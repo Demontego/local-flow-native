@@ -1,0 +1,186 @@
+use crate::config::EngineConfig;
+use crate::error::{Error, Result};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+pub const WHISPER_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+
+/// Small text Qwen3 for cleanup (~1.1 GB). Not bundled in .dmg.
+pub const LLM_FILENAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
+pub const LLM_URL: &str = concat!(
+    "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/",
+    "Qwen3-1.7B-Q4_K_M.gguf"
+);
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelsStatus {
+    pub whisper: bool,
+    pub llm: bool,
+    pub whisper_path: String,
+    pub llm_path: String,
+}
+
+pub fn status(cfg: &EngineConfig) -> ModelsStatus {
+    let w = cfg.resolve_whisper_path();
+    let l = cfg.llm_model.clone();
+    ModelsStatus {
+        whisper: whisper_ready(&w),
+        llm: llm_ready(&l),
+        whisper_path: w.display().to_string(),
+        llm_path: l.display().to_string(),
+    }
+}
+
+fn file_size(p: &Path) -> u64 {
+    fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+pub fn ensure_models_dir(cfg: &EngineConfig) -> Result<PathBuf> {
+    let dir = cfg.cache_dir.join("models");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Outcome of a model fetch: path + whether network was skipped.
+#[derive(Debug, Clone)]
+pub struct DownloadResult {
+    pub path: PathBuf,
+    pub already_present: bool,
+}
+
+impl DownloadResult {
+    /// Wire format for shells: `already:<path>` or `<path>`.
+    pub fn to_wire(&self) -> String {
+        let p = self.path.display().to_string();
+        if self.already_present {
+            format!("already:{p}")
+        } else {
+            p
+        }
+    }
+}
+
+fn whisper_ready(path: &Path) -> bool {
+    path.exists() && file_size(path) > 100_000_000
+}
+
+fn llm_ready(path: &Path) -> bool {
+    path.exists() && file_size(path) > 500_000_000
+}
+
+/// Download whisper ggml if missing. Progress via callback percent 0..=100.
+/// Reuses Python Local Flow cache (`resolve_whisper_path`) when present.
+pub fn download_whisper(
+    cfg: &EngineConfig,
+    mut on_progress: impl FnMut(u32),
+) -> Result<DownloadResult> {
+    let existing = cfg.resolve_whisper_path();
+    if whisper_ready(&existing) {
+        on_progress(100);
+        return Ok(DownloadResult {
+            path: existing,
+            already_present: true,
+        });
+    }
+    let dest = cfg.whisper_model.clone();
+    ensure_models_dir(cfg)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("partial");
+    download_url(WHISPER_URL, &tmp, &mut on_progress)?;
+    fs::rename(&tmp, &dest)?;
+    on_progress(100);
+    Ok(DownloadResult {
+        path: dest,
+        already_present: false,
+    })
+}
+
+/// Download Qwen3-1.7B Q4_K_M GGUF (~1.1 GB).
+pub fn download_qwen(
+    cfg: &EngineConfig,
+    mut on_progress: impl FnMut(u32),
+) -> Result<DownloadResult> {
+    let dest = cfg.llm_model.clone();
+    if llm_ready(&dest) {
+        on_progress(100);
+        return Ok(DownloadResult {
+            path: dest,
+            already_present: true,
+        });
+    }
+    ensure_models_dir(cfg)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("partial");
+    download_url(LLM_URL, &tmp, &mut on_progress)?;
+    fs::rename(&tmp, &dest)?;
+    on_progress(100);
+    Ok(DownloadResult {
+        path: dest,
+        already_present: false,
+    })
+}
+
+fn download_url(url: &str, dest: &Path, on_progress: &mut impl FnMut(u32)) -> Result<()> {
+    let mut resp = ureq::get(url)
+        .call()
+        .map_err(|e| Error::msg(format!("download: {e}")))?;
+    let len = resp
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut reader = resp.body_mut().as_reader();
+    let mut file = fs::File::create(dest)?;
+    let mut buf = [0u8; 1024 * 64];
+    let mut done = 0u64;
+    let mut last_pct = 0u32;
+    on_progress(0);
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..n])?;
+        done += n as u64;
+        if len > 0 {
+            let pct = ((done * 100) / len) as u32;
+            if pct != last_pct {
+                last_pct = pct;
+                on_progress(pct.min(99));
+            }
+        }
+    }
+    on_progress(100);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EngineConfig;
+
+    #[test]
+    fn skip_download_when_present() {
+        let cfg = EngineConfig::default();
+        let w = download_whisper(&cfg, |_| {}).expect("whisper");
+        assert!(
+            w.already_present,
+            "whisper should reuse cache, got {}",
+            w.path.display()
+        );
+        let q = download_qwen(&cfg, |_| {}).expect("qwen");
+        assert!(
+            q.already_present,
+            "qwen should reuse cache, got {}",
+            q.path.display()
+        );
+        assert!(q.to_wire().starts_with("already:"));
+    }
+}

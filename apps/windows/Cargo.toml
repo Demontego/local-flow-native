@@ -1,0 +1,22 @@
+[package]
+name = "local-flow-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows tray shell for Local Flow Native"
+
+[[bin]]
+name = "local-flow-windows"
+path = "src/main.rs"
+
+[dependencies]
+local-flow-core = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# Wired when building on Windows:
+# tray-icon = "0.19"
+# global-hotkey = "0.6"
+# cpal = "0.15"
+# arboard = "3"

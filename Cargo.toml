@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/local-flow-core",
+    "crates/local-flow-ffi",
+    "apps/windows",
+]
+default-members = [
+    "crates/local-flow-core",
+    "crates/local-flow-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/local-flow/local-flow-native"
+
+[workspace.dependencies]
+local-flow-core = { path = "crates/local-flow-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+parking_lot = "0.12"
+uniffi = "0.29.3"

@@ -1,0 +1,26 @@
+[package]
+name = "local-flow-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UniFFI bindings for local-flow-core"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+name = "local_flow_ffi"
+
+[features]
+default = []
+full = ["local-flow-core/full"]
+whisper = ["local-flow-core/whisper"]
+llama = ["local-flow-core/llama"]
+
+[dependencies]
+local-flow-core = { workspace = true }
+uniffi = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }
