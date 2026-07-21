@@ -268,14 +268,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = self.worker_tx.send(WorkerCmd::HoldEnd);
             }
             UserEvent::Menu(id) => {
-                if self.item_quit.as_ref().is_some_and(|i| i.id() == id) {
+                if self.item_quit.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::Shutdown);
                     event_loop.exit();
-                } else if self.item_load.as_ref().is_some_and(|i| i.id() == id) {
+                } else if self.item_load.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::LoadModels);
-                } else if self.item_whisper.as_ref().is_some_and(|i| i.id() == id) {
+                } else if self.item_whisper.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::DownloadWhisper);
-                } else if self.item_qwen.as_ref().is_some_and(|i| i.id() == id) {
+                } else if self.item_qwen.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::DownloadQwen);
                 }
             }

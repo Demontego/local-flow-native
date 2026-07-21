@@ -108,11 +108,19 @@ where
     f32: FromSample<T>,
 {
     if channels <= 1 {
-        return data.iter().copied().map(Sample::to_sample).collect();
+        return data
+            .iter()
+            .copied()
+            .map(|s| Sample::to_sample::<f32>(s))
+            .collect();
     }
     data.chunks(channels)
         .map(|frame| {
-            let sum: f32 = frame.iter().copied().map(Sample::to_sample).sum();
+            let sum: f32 = frame
+                .iter()
+                .copied()
+                .map(|s| Sample::to_sample::<f32>(s))
+                .sum();
             sum / channels as f32
         })
         .collect()

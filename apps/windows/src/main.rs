@@ -3,7 +3,9 @@
 //! Hold Ctrl+Alt → speak → release → cleaned text pasted (clipboard + Ctrl+V).
 //! Non-Windows hosts smoke-test the engine so macOS CI still validates the crate.
 
+#[cfg(not(windows))]
 use local_flow_core::config::EngineConfig;
+#[cfg(not(windows))]
 use local_flow_core::context::DictationContext;
 use local_flow_core::session::Engine;
 use std::path::PathBuf;
