@@ -49,9 +49,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlay = OverlayController()
         trackFrontmostApps()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let btn = statusItem.button {
-            btn.title = "LF"
+            if let icon = Self.statusBarImage() {
+                btn.image = icon
+                btn.imagePosition = .imageOnly
+            } else {
+                btn.title = "LF"
+            }
             btn.toolTip = "Hold left mouse = dictate · Right-click = menu · Or hold Ctrl+Option"
             btn.sendAction(on: [.leftMouseDown, .leftMouseUp, .rightMouseDown])
             btn.target = self
@@ -563,5 +568,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Menubar / tray glyph from Contents/Resources (falls back to "LF" title).
+    private static func statusBarImage() -> NSImage? {
+        let bundle = Bundle.main
+        let img = bundle.image(forResource: "StatusIcon")
+            ?? NSImage(contentsOf: bundle.bundleURL
+                .appendingPathComponent("Contents/Resources/StatusIcon.png"))
+        guard let img else { return nil }
+        // Square menubar slot (~18pt); keep color brand mark (not template).
+        let side: CGFloat = 18
+        img.size = NSSize(width: side, height: side)
+        img.isTemplate = false
+        return img
     }
 }

@@ -78,8 +78,8 @@ enum ContextCollector {
         let blob = (ctx.appName + " " + ctx.bundleId).lowercased()
         let hints = [
             "telegram", "slack", "discord", "whatsapp", "messages", "messenger",
-            "mattermost", "itsa-orcs", "time", "claude", "anthropic", "chatgpt",
-            "teams", "element", "signal",
+            "mattermost", "teams", "element", "signal",
+            "chatgpt", "claude",
         ]
         return hints.contains { blob.contains($0) }
     }

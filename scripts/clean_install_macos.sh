@@ -26,7 +26,7 @@ tccutil reset ListenEvent "${BUNDLE_ID}" 2>/dev/null || true
 tccutil reset AppleEvents "${BUNDLE_ID}" 2>/dev/null || true
 
 echo "==> Clear paste debug log"
-rm -f "${HOME}/.cache/local-flow-native/paste.log"
+rm -f "${HOME}/Library/Application Support/Local Flow Native/paste.log"
 
 echo "==> Build"
 source "${HOME}/.cargo/env" 2>/dev/null || true
@@ -64,5 +64,5 @@ NOW (required once):
   6. Click a text field → hold Ctrl+Option and speak
 
 Overlay should show AX✓. If paste fails, check:
-  ~/.cache/local-flow-native/paste.log
+  ~/Library/Application Support/Local Flow Native/paste.log
 EOF

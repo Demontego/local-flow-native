@@ -38,7 +38,7 @@ fn file_size(p: &Path) -> u64 {
 }
 
 pub fn ensure_models_dir(cfg: &EngineConfig) -> Result<PathBuf> {
-    let dir = cfg.cache_dir.join("models");
+    let dir = cfg.data_dir.join("models");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -71,7 +71,6 @@ fn llm_ready(path: &Path) -> bool {
 }
 
 /// Download whisper ggml if missing. Progress via callback percent 0..=100.
-/// Reuses Python Local Flow cache (`resolve_whisper_path`) when present.
 pub fn download_whisper(
     cfg: &EngineConfig,
     mut on_progress: impl FnMut(u32),
@@ -167,20 +166,19 @@ mod tests {
     use crate::config::EngineConfig;
 
     #[test]
-    fn skip_download_when_present() {
-        let cfg = EngineConfig::default();
-        let w = download_whisper(&cfg, |_| {}).expect("whisper");
-        assert!(
-            w.already_present,
-            "whisper should reuse cache, got {}",
-            w.path.display()
+    fn model_paths_are_inside_supplied_data_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cfg = EngineConfig::new(temp.path());
+        assert_eq!(
+            ensure_models_dir(&cfg).expect("models dir"),
+            temp.path().join("models")
         );
-        let q = download_qwen(&cfg, |_| {}).expect("qwen");
-        assert!(
-            q.already_present,
-            "qwen should reuse cache, got {}",
-            q.path.display()
-        );
-        assert!(q.to_wire().starts_with("already:"));
+        assert_eq!(cfg.llm_model, temp.path().join("models").join(LLM_FILENAME));
+
+        let result = DownloadResult {
+            path: cfg.llm_model,
+            already_present: true,
+        };
+        assert!(result.to_wire().starts_with("already:"));
     }
 }

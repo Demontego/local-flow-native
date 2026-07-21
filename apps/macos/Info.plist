@@ -12,6 +12,8 @@
     <string>Local Whisper Flow</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>LSUIElement</key>
@@ -20,7 +22,5 @@
     <string>Local Whisper Flow needs the microphone for on-device dictation.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Local Whisper Flow uses accessibility to paste dictated text.</string>
-    <key>NSScreenCaptureDescription</key>
-    <string>Local Whisper Flow can capture the frontmost window for context.</string>
 </dict>
 </plist>

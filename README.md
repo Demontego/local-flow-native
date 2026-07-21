@@ -1,84 +1,135 @@
 # Local Flow Native
 
-Cross-platform on-device dictation: **Rust core** (whisper.cpp + llama.cpp) + thin native shells.
+On-device dictation: **Rust core** (whisper.cpp + llama.cpp) + thin platform shells.
+Audio, models, history, and personalization stay on the device.
 
 | Shell | Path | Status |
 |-------|------|--------|
-| macOS menubar | `apps/macos` | Phase 1 scaffold (hotkey, overlay, AX, paste) |
-| Windows tray | `apps/windows` | Scaffold + engine smoke |
-| Mobile IME | `apps/mobile` | UniFFI-oriented stubs |
+| macOS menubar | `apps/macos` | Hotkey, overlay, Accessibility paste |
+| Windows tray | `apps/windows` | Ctrl+Alt hold, tray menu, clipboard paste |
+| Flutter + IME | `apps/local_flow_app` | Android IME + iOS keyboard |
 
-Python Local Flow (`../local-flow`) remains the daily driver until Mac parity is polished.
+License: [MIT](LICENSE). Third-party notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## GitHub Releases
+
+Push a version tag; CI builds packages and attaches them to the Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+| Asset | Notes |
+|-------|--------|
+| macOS `.dmg` | Ad-hoc signed menubar app (`make dmg`) |
+| Windows `*-windows-x64.exe` | Tray app; hold Ctrl+Alt (`make windows`) |
+| Android `*-android-debug.apk` | Debug build with arm64 JNI |
+
+Store-signed Play/App Store builds are not automated — see
+[docs/store/mobile-release.md](docs/store/mobile-release.md).
+Manual CI package smoke: Actions → **Mobile package (manual)**.
 
 ## Build
 
 ```bash
-source ~/.cargo/env
+# Rust toolchain on PATH (or: source "$HOME/.cargo/env")
 make build
 make test
 make macos          # → dist/Local Whisper Flow.app
-make dmg            # → dist/Local Whisper Flow-0.1.0.dmg (drag to Applications)
-make full           # rebuild ffi with whisper.cpp + llama.cpp (slow)
+make dmg            # → dist/Local Whisper Flow-0.1.0.dmg
+make windows        # → target/release/local-flow-windows.exe (build on Windows)
 ```
 
-Install: open the DMG → drag **Local Whisper Flow** into **Applications**.  
-First run: grant **Microphone**, **Accessibility**, and **Input Monitoring** (System Settings → Privacy).  
-If the hotkey does nothing after allowing access: menubar **LF → Retry hotkey / permissions**.
+**Windows:** run the exe → tray tooltip **Local Flow** → hold **Ctrl+Alt** to dictate → release pastes.
+Tray menu: Load models / Download Whisper / Download Qwen / Quit.
+Data dir: `%LOCALAPPDATA%\Local Flow Native\`.
+
+Mobile (needs Flutter; Android also needs `ANDROID_NDK_HOME`):
+
+```bash
+make flutter-analyze
+ANDROID_NDK_HOME=/path/to/ndk make android-debug
+make ios-simulator
+```
+
+Cross-compile FFI:
+
+```bash
+rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim \
+  aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+  x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
+make ffi-macos
+make ffi-ios
+make ffi-ios-sim
+ANDROID_NDK_HOME=/path/to/ndk make ffi-android
+make ffi-windows   # on Windows + MSVC
+make ffi-linux     # on Ubuntu 24.04
+```
+
+Android NDK linker names live in `.cargo/config.toml` (API 24). Override
+`ANDROID_NDK_HOST_TAG` if the NDK host folder is not auto-detected.
+
+## Install (macOS)
+
+Open the DMG → drag **Local Whisper Flow** into **Applications**.
+
+First launch: grant **Microphone**, **Accessibility**, and **Input Monitoring**.
+If the hotkey does nothing: menubar **LF → Retry hotkey / permissions**.
+
+Hold **Ctrl+Option** → speak → release → cleaned text is pasted.
 
 ## Architecture
 
 ```
 crates/local-flow-core   session FSM, ASR, cleanup, history
-crates/local-flow-ffi    UniFFI + C ABI for shells
-apps/macos               Swift UI / permissions / audio
-apps/windows             tray shell (Windows target)
-apps/mobile              iOS keyboard + Android IME scaffolds
+crates/local-flow-ffi    C ABI (+ JNI for Android; UniFFI stubs optional)
+apps/macos               Swift menubar / permissions / audio / AX paste
+apps/windows             Rust tray / Ctrl+Alt / mic / clipboard paste
+apps/local_flow_app      Flutter host + Android IME + iOS keyboard
+vendor/whisper-rs-sys    patched whisper.cpp bindgen for mobile NDK
 ```
+
+Each shell passes its own application-data directory into the C ABI. The core
+never reads `HOME` or a shared global cache for models or personalization.
 
 ## Models
 
-Not inside the `.dmg` (would be multi‑GB). Download from the menubar after install:
+Weights are not in the DMG/APK (multi-GB). Download from the app after install.
 
-Cache: `~/.cache/local-flow-native/models/`
+| Platform | Data directory |
+|----------|----------------|
+| macOS menubar | `~/Library/Application Support/Local Flow Native/` |
+| Flutter iOS | App Group `group.ai.localflow.app` |
+| Flutter Android | app `filesDir` |
+| Windows tray | `%LOCALAPPDATA%\Local Flow Native\` |
 
-- **Whisper:** menu → Download Whisper (`ggml-small.bin`)
-- **Qwen3:** menu → Download Qwen3 (`Qwen3-1.7B-Q4_K_M.gguf` ~1.1 GB, text cleanup)
-- Then **Load models**. Without Qwen, cleanup uses a small heuristic.
-- Context: Accessibility (AX) from the frontmost app — no vision/screenshot path.
+- **Whisper:** `ggml-small.bin`
+- **Qwen3:** `Qwen3-1.7B-Q4_K_M.gguf` (~1.1 GB cleanup)
+- Then **Load models**. Without Qwen, cleanup falls back to a small heuristic.
+- Context comes from Accessibility / IME — no screenshot path.
 
-## Local personalization
+## Personalization (macOS menubar)
 
-The menubar menu provides local-only controls:
+Local-only controls in the LF menu:
 
-- **Add dictionary replacement…** corrects repeat ASR mistakes and biases Whisper toward the
-  corrected vocabulary.
-- **Add voice snippet…** expands a spoken phrase into exact saved text after cleanup.
-- **Set writing style for focused app…** chooses concise technical, casual, or neutral phrasing
-  per application.
-- **Command: polish selected text** replaces the selected text using the existing cleanup model.
-- **Toggle live typing**, **Toggle app context capture**, and **Toggle cleanup** make the
-  sensitive or disruptive parts opt-in.
-- Spoken formatting is local and deterministic: say **запятая**, **точка**, **новая строка**,
-  **новый абзац**, or end with **нажми enter**. Clear numeric corrections such as
-  “в 2, нет, в 3” become “в 3”.
-- **Undo last Local Flow paste** is available for 30 seconds only when focus and the caret still
-  immediately follow the inserted text. **Retry last Local Flow paste** retries an Accessibility
-  failure without changing focus.
+- Dictionary replacements and voice snippets
+- Per-app writing style
+- Polish selected text, live typing, context capture, cleanup toggles
+- Spoken punctuation (e.g. **запятая**, **точка**, **новая строка**)
+- Undo / retry last paste (short window, focus must still match)
 
-Rules, snippets, profiles, and the cleanup toggle are stored locally at
-`~/.cache/local-flow-native/personalization.json`; no account or sync service is used.
+Stored under the app data directory as `personalization.json` — no account, no sync.
 
 ## Quality checks
 
 ```bash
 cargo test -p local-flow-core --test heuristic -- --skip qwen_cleanup
 make macos
+make flutter-analyze
 ```
 
-The regression suite covers deterministic Russian homophone repairs, dictionary replacement,
-snippet expansion, and core session transitions. Before a release, manually verify dictation,
-selected-text polish, spacing, and paste in Cursor, Telegram, a browser, and a native text field.
+Before a release, manually verify dictation and paste in a few real apps
+(editor, messenger, browser, native text field).
 
-## Hotkey (macOS)
-
-Hold **Ctrl+Option** → speak → release → cleaned text pasted.
+Store signing notes (credentials never in git): [docs/store/mobile-release.md](docs/store/mobile-release.md).

@@ -1,0 +1,121 @@
+# Tag v* → GitHub Release (macOS DMG + Windows tray + Android debug APK).
+# Store-signed AAB/IPA stay manual (see docs/store/mobile-release.md).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-dmg:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build DMG
+        run: make dmg
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist/release
+          cp dist/*.dmg dist/release/
+          shasum -a 256 dist/release/*.dmg > dist/release/SHA256SUMS-macos.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/release/*
+          if-no-files-found: error
+
+  windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build Windows tray (full)
+        shell: bash
+        run: make windows
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          EXE="$(find target -name 'local-flow-windows.exe' -path '*/release/*' | head -1)"
+          test -n "$EXE"
+          cp "$EXE" "dist/release/local-flow-${{ github.ref_name }}-windows-x64.exe"
+          (cd dist/release && sha256sum *.exe > SHA256SUMS-windows.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/release/*
+          if-no-files-found: error
+
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build debug APK
+        run: make android-debug
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist/release
+          cp apps/local_flow_app/build/app/outputs/flutter-apk/app-debug.apk \
+            "dist/release/local-flow-${{ github.ref_name }}-android-debug.apk"
+          if [[ -d dist/android ]]; then cp -R dist/android/. dist/release/ || true; fi
+          shasum -a 256 dist/release/*.apk > dist/release/SHA256SUMS-android.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/release/*
+          if-no-files-found: error
+
+  github-release:
+    needs: [macos-dmg, windows-exe, android-apk]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: List assets
+        run: find release-assets -type f | sort
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ### Install notes
+            - **macOS:** open the DMG, drag to Applications; grant Mic / Accessibility / Input Monitoring.
+            - **Windows:** run the `.exe` (tray icon **LF**); hold **Ctrl+Alt** to dictate. Grant microphone access when prompted.
+            - **Android:** debug APK — enable the Local Flow keyboard in system settings after install.
+            - Model weights are downloaded in-app (not bundled).
+          files: release-assets/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

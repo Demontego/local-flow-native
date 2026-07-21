@@ -28,8 +28,6 @@ impl DictationContext {
             "messages",
             "messenger",
             "mattermost",
-            "itsa-orcs",
-            "time",
             "teams",
             "element",
             "signal",
@@ -68,8 +66,8 @@ impl DictationContext {
         )
         .to_lowercase();
         [
-            "ds-team",
             "devops",
+            "engineering",
             "code",
             "deploy",
             "сервис",
@@ -77,9 +75,6 @@ impl DictationContext {
             "pr",
             "gitlab",
             "github",
-            "claude",
-            "messenger",
-            "itsa-orcs",
             "thread",
         ]
         .iter()

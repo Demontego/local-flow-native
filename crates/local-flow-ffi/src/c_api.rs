@@ -78,8 +78,11 @@ fn context_from_c(c: *const LFContext) -> FfiContext {
 }
 
 #[no_mangle]
-pub extern "C" fn lf_engine_new() -> *mut LocalFlowEngine {
-    Arc::into_raw(LocalFlowEngine::new()) as *mut LocalFlowEngine
+pub extern "C" fn lf_engine_new(data_dir: *const c_char) -> *mut LocalFlowEngine {
+    LocalFlowEngine::new(cstr_to_string(data_dir))
+        .map(Arc::into_raw)
+        .map(|ptr| ptr as *mut LocalFlowEngine)
+        .unwrap_or(ptr::null_mut())
 }
 
 #[no_mangle]

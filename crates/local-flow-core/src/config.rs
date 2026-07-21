@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Paths and knobs for the shared engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
-    pub cache_dir: PathBuf,
+    /// Platform sandbox owned by the calling shell.
+    pub data_dir: PathBuf,
     pub whisper_model: PathBuf,
     pub llm_model: PathBuf,
     pub sample_rate: u32,
@@ -13,12 +14,14 @@ pub struct EngineConfig {
     pub cleanup_prompt: String,
 }
 
-impl Default for EngineConfig {
-    fn default() -> Self {
-        let cache = default_cache_dir();
-        let models = cache.join("models");
+impl EngineConfig {
+    /// The host must provide its application-data sandbox. The core never
+    /// consults HOME, XDG, or a working-directory cache.
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        let data_dir = data_dir.into();
+        let models = data_dir.join("models");
         Self {
-            cache_dir: cache,
+            data_dir,
             whisper_model: models.join("ggml-small.bin"),
             llm_model: models.join(crate::models::LLM_FILENAME),
             sample_rate: 16_000,
@@ -26,34 +29,27 @@ impl Default for EngineConfig {
             cleanup_prompt: crate::cleanup::DEFAULT_PROMPT.to_string(),
         }
     }
-}
 
-pub fn default_cache_dir() -> PathBuf {
-    dirs_next_home()
-        .map(|h| h.join(".cache").join("local-flow-native"))
-        .unwrap_or_else(|| PathBuf::from(".cache/local-flow-native"))
-}
-
-fn dirs_next_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-impl EngineConfig {
-    /// Prefer existing Python Local Flow whisper if native path missing.
     pub fn resolve_whisper_path(&self) -> PathBuf {
-        if self.whisper_model.exists() {
-            return self.whisper_model.clone();
-        }
-        if let Some(home) = dirs_next_home() {
-            let legacy = home
-                .join(".cache")
-                .join("local-flow")
-                .join("models")
-                .join("ggml-small.bin");
-            if legacy.exists() {
-                return legacy;
-            }
-        }
         self.whisper_model.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EngineConfig;
+    use std::path::Path;
+
+    #[test]
+    fn model_paths_stay_inside_shell_data_dir() {
+        let config = EngineConfig::new("shell-data");
+        assert_eq!(
+            config.whisper_model,
+            Path::new("shell-data/models/ggml-small.bin")
+        );
+        assert_eq!(
+            config.llm_model,
+            Path::new("shell-data/models/Qwen3-1.7B-Q4_K_M.gguf")
+        );
     }
 }

@@ -149,31 +149,29 @@ mod whisper_backend {
             state
                 .full(params, pcm_f32)
                 .map_err(|e| Error::Asr(format!("full: {e}")))?;
-            let n = state
-                .full_n_segments()
-                .map_err(|e| Error::Asr(format!("segments: {e}")))?;
+            let n = state.full_n_segments();
             let mut out = String::new();
             let mut probability_sum = 0.0;
             let mut probability_count = 0_u32;
             for i in 0..n {
-                let seg = state
-                    .full_get_segment_text(i)
-                    .map_err(|e| Error::Asr(format!("seg: {e}")))?;
+                let segment = state
+                    .get_segment(i)
+                    .ok_or_else(|| Error::Asr(format!("segment {i} out of bounds")))?;
+                let seg = segment
+                    .to_str()
+                    .map_err(|e| Error::Asr(format!("segment: {e}")))?;
                 if !out.is_empty() {
                     out.push(' ');
                 }
                 out.push_str(seg.trim());
-                let tokens = state
-                    .full_n_tokens(i)
-                    .map_err(|e| Error::Asr(format!("tokens: {e}")))?;
-                for token in 0..tokens {
-                    let probability = state
-                        .full_get_token_prob(i, token)
-                        .map_err(|e| Error::Asr(format!("token probability: {e}")))?;
+                let mut token = 0;
+                while let Some(token_info) = segment.get_token(token) {
+                    let probability = token_info.token_probability();
                     if probability.is_finite() {
                         probability_sum += probability;
                         probability_count += 1;
                     }
+                    token += 1;
                 }
             }
             Ok(Transcription {

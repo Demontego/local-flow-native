@@ -9,14 +9,26 @@ description = "Windows tray shell for Local Flow Native"
 name = "local-flow-windows"
 path = "src/main.rs"
 
+[features]
+default = []
+# Whisper + Qwen (slow compile). Release / `make windows` enable this.
+full = ["local-flow-core/full"]
+
 [dependencies]
 local-flow-core = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+parking_lot = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-# Wired when building on Windows:
-# tray-icon = "0.19"
-# global-hotkey = "0.6"
-# cpal = "0.15"
-# arboard = "3"
+tray-icon = "0.19"
+winit = "0.30"
+cpal = "0.15"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }

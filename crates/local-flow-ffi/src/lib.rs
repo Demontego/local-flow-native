@@ -2,6 +2,9 @@ uniffi::setup_scaffolding!();
 
 pub mod c_api;
 
+#[cfg(target_os = "android")]
+pub mod jni_api;
+
 use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::session::Engine;
@@ -77,11 +80,16 @@ pub struct LocalFlowEngine {
 #[uniffi::export]
 impl LocalFlowEngine {
     #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: Engine::new(EngineConfig::default()),
+    pub fn new(data_dir: String) -> Result<Arc<Self>, FlowError> {
+        if data_dir.trim().is_empty() {
+            return Err(FlowError::Message {
+                msg: "application data directory is required".into(),
+            });
+        }
+        Ok(Arc::new(Self {
+            inner: Engine::new(EngineConfig::new(data_dir)),
             summary: Mutex::new(String::new()),
-        })
+        }))
     }
 
     pub fn models_status(&self) -> FfiModelsStatus {

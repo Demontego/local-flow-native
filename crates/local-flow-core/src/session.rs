@@ -51,10 +51,6 @@ impl Engine {
         }
     }
 
-    pub fn with_defaults() -> Self {
-        Self::new(EngineConfig::default())
-    }
-
     pub fn version() -> &'static str {
         crate::VERSION
     }
@@ -159,10 +155,10 @@ impl Engine {
         }
 
         let outcome = (|| -> Result<SessionResult> {
-            let personalization = personalization::load(&self.cfg.cache_dir);
+            let personalization = personalization::load(&self.cfg.data_dir);
             personalization::apply_context(&mut ctx, &personalization);
             if ctx.recent.is_empty() && !ctx.bundle_id.is_empty() {
-                ctx.recent = history::load_recent(&self.cfg.cache_dir, &ctx.bundle_id);
+                ctx.recent = history::load_recent(&self.cfg.data_dir, &ctx.bundle_id);
             }
 
             let pcm = std::mem::take(&mut *self.pcm.lock());
@@ -236,7 +232,7 @@ impl Engine {
             );
 
             if !clean.is_empty() && !ctx.bundle_id.is_empty() {
-                let _ = history::save_recent(&self.cfg.cache_dir, &ctx.bundle_id, &clean);
+                let _ = history::save_recent(&self.cfg.data_dir, &ctx.bundle_id, &clean);
             }
             log_quality(&self.cfg, &raw, &clean, cleanup_decision, asr_confidence);
 
@@ -271,15 +267,15 @@ impl Engine {
     }
 
     pub fn personalization(&self) -> personalization::Personalization {
-        personalization::load(&self.cfg.cache_dir)
+        personalization::load(&self.cfg.data_dir)
     }
 
     pub fn save_personalization(&self, settings: &personalization::Personalization) -> Result<()> {
-        personalization::save(&self.cfg.cache_dir, settings)
+        personalization::save(&self.cfg.data_dir, settings)
     }
 
     pub fn recent_for(&self, bundle_id: &str) -> Vec<String> {
-        history::load_recent(&self.cfg.cache_dir, bundle_id)
+        history::load_recent(&self.cfg.data_dir, bundle_id)
     }
 }
 
@@ -299,8 +295,8 @@ fn log_quality(
         clipped.replace('"', "'")
     }
 
-    let path = cfg.cache_dir.join("paste.log");
-    if std::fs::create_dir_all(&cfg.cache_dir).is_err() {
+    let path = cfg.data_dir.join("paste.log");
+    if std::fs::create_dir_all(&cfg.data_dir).is_err() {
         return;
     }
     let confidence = confidence

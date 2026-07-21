@@ -395,19 +395,20 @@ enum Pasteboard {
 
     private static func log(_ msg: String) {
         NSLog("LocalFlow %@", msg)
-        let dir = (NSHomeDirectory() as NSString).appendingPathComponent(".cache/local-flow-native")
-        let path = (dir as NSString).appendingPathComponent("paste.log")
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Local Flow Native", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("paste.log")
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
         if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: path),
-               let h = try? FileHandle(forWritingTo: URL(fileURLWithPath: path))
+            if FileManager.default.fileExists(atPath: path.path),
+               let h = try? FileHandle(forWritingTo: path)
             {
                 defer { try? h.close() }
                 h.seekToEndOfFile()
                 h.write(data)
             } else {
-                try? data.write(to: URL(fileURLWithPath: path))
+                try? data.write(to: path)
             }
         }
     }

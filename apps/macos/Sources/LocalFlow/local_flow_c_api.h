@@ -26,7 +26,8 @@ typedef struct LFSessionResult {
 
 typedef void (*lf_progress_cb)(uint32_t percent, void *userdata);
 
-LocalFlowEngine *lf_engine_new(void);
+/* data_dir must be the shell-owned application-data directory. */
+LocalFlowEngine *lf_engine_new(const char *data_dir);
 void lf_engine_free(LocalFlowEngine *ptr);
 void lf_string_free(char *s);
 char *lf_engine_load_models(LocalFlowEngine *ptr);

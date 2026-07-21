@@ -24,3 +24,7 @@ thiserror = "2"
 tracing = "0.1"
 parking_lot = "0.12"
 uniffi = "0.29.3"
+
+# Host-macOS cfg wrongly linked ggml-blas for Android. Fixed in vendor build.rs.
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }

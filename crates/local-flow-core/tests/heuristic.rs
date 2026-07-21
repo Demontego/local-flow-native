@@ -1,4 +1,5 @@
 use local_flow_core::cleanup::{accepts_cleanup, heuristic_polish, smart_format, CleanupEngine};
+use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::personalization::{
     apply_context, apply_replacements, expand_snippets, Personalization, Replacement, Snippet,
@@ -8,7 +9,7 @@ use local_flow_core::session::Engine;
 #[test]
 fn kot_to_kod_in_tech_chat() {
     let ctx = DictationContext {
-        channel_hint: "Thread ds-team".into(),
+        channel_hint: "Thread engineering".into(),
         chat_lines: vec!["надо поправить сервис".into()],
         ..Default::default()
     };
@@ -38,7 +39,8 @@ fn gazovogo_voda_to_golosovogo_vvoda() {
 
 #[test]
 fn engine_session_fsm_smoke() {
-    let eng = Engine::with_defaults();
+    let data = tempfile::tempdir().unwrap();
+    let eng = Engine::new(EngineConfig::new(data.path()));
     let summary = eng.load_models().unwrap();
     // stub/heuristic if models missing; whisper/qwen3 when downloaded
     assert!(
@@ -69,14 +71,16 @@ fn cleanup_engine_heuristic() {
 #[cfg(feature = "llama")]
 fn qwen_cleanup_smoke_if_present() {
     use local_flow_core::cleanup::CleanupEngine;
-    use local_flow_core::config::EngineConfig;
-    let cfg = EngineConfig::default();
+    let Some(data_dir) = std::env::var_os("LOCAL_FLOW_DATA_DIR") else {
+        return;
+    };
+    let cfg = EngineConfig::new(data_dir);
     if !cfg.llm_model.exists() {
         return;
     }
     let eng = CleanupEngine::load(&cfg.llm_model, &cfg.cleanup_prompt).expect("load qwen");
     let ctx = DictationContext {
-        channel_hint: "Thread ds-team".into(),
+        channel_hint: "Thread engineering".into(),
         chat_lines: vec!["надо поправить сервис".into()],
         ..Default::default()
     };

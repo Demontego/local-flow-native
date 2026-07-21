@@ -1,27 +1,44 @@
 //! Windows tray shell — same `local-flow-core` session API as macOS.
 //!
-//! Full tray/hotkey/cpal wiring is `cfg(windows)`. On other hosts this binary
-//! smoke-tests the shared engine so CI on macOS still validates the crate.
+//! Hold Ctrl+Alt → speak → release → cleaned text pasted (clipboard + Ctrl+V).
+//! Non-Windows hosts smoke-test the engine so macOS CI still validates the crate.
 
+use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::session::Engine;
+use std::path::PathBuf;
+
+fn application_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Local Flow Native")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::temp_dir().join("Local Flow Native")
+    }
+}
 
 fn main() {
     tracing_subscriber::fmt::init();
-    println!("local-flow-windows {}", Engine::version());
+    tracing::info!("local-flow-windows {}", Engine::version());
 
     #[cfg(not(windows))]
     {
-        let eng = Engine::with_defaults();
+        let eng = Engine::new(EngineConfig::new(application_data_dir()));
         let summary = eng.load_models().expect("load");
-        println!("engine ready ({summary}) — rebuild with --target x86_64-pc-windows-msvc on Windows for tray UI");
-        // Smoke session FSM
+        println!(
+            "engine ready ({summary}) — build on Windows with --features full for tray UI"
+        );
         eng.start_hold().unwrap();
         eng.cancel_hold();
         let _ = eng.cleanup_text(
             "ну типа привет кот",
             &DictationContext {
-                channel_hint: "ds-team".into(),
+                channel_hint: "devops".into(),
                 ..Default::default()
             },
         );
@@ -30,19 +47,12 @@ fn main() {
 
     #[cfg(windows)]
     {
-        windows_run();
+        if let Err(e) = win_app::run(application_data_dir()) {
+            tracing::error!("windows shell failed: {e:#}");
+            std::process::exit(1);
+        }
     }
 }
 
 #[cfg(windows)]
-fn windows_run() {
-    // Placeholder for tray + Ctrl+Alt hold + WASAPI/cpal capture + UI Automation context.
-    // Same Engine API as macOS Swift shell.
-    let eng = Engine::with_defaults();
-    let summary = eng.load_models().expect("load models");
-    println!("Local Flow Windows ready ({summary})");
-    println!("TODO: tray-icon + global-hotkey + cpal loop (scaffold in place)");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
-}
+mod win_app;

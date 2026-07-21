@@ -10,7 +10,17 @@ final class EngineBridge {
     private let handle: OpaquePointer
 
     init() {
-        handle = lf_engine_new()
+        let dataDir = try! FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ).appendingPathComponent("Local Flow Native", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        guard let handle = dataDir.path.withCString({ lf_engine_new($0) }) else {
+            fatalError("Local Flow requires an application data directory")
+        }
+        self.handle = handle
     }
 
     deinit {
