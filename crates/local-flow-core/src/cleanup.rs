@@ -9,6 +9,84 @@ pub trait CleanupBackend: Send + Sync {
     fn cleanup(&self, raw: &str, ctx: &DictationContext) -> Result<String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmartFormat {
+    pub text: String,
+    pub press_enter: bool,
+}
+
+/// Deterministic spoken punctuation and conservative self-correction.
+/// Kept separate from Qwen so local/heuristic mode has the same controls.
+pub fn smart_format(raw: &str) -> SmartFormat {
+    let mut text = raw.trim().to_string();
+    let press_enter = strip_trailing_enter(&mut text);
+    text = backtrack(&text);
+    text = numbered_list(&text);
+    for (spoken, symbol) in [
+        ("новый абзац", "\n\n"),
+        ("новая строка", "\n"),
+        ("следующая строка", "\n"),
+        ("точка с запятой", ";"),
+        ("восклицательный знак", "!"),
+        ("вопросительный знак", "?"),
+        ("двоеточие", ":"),
+        ("запятая", ","),
+        ("точка", "."),
+        ("тире", " — "),
+    ] {
+        text = replace_ci(&text, spoken, symbol);
+    }
+    SmartFormat {
+        text: normalize_format_whitespace(&text),
+        press_enter,
+    }
+}
+
+fn strip_trailing_enter(text: &mut String) -> bool {
+    let re = regex::Regex::new(
+        r"(?i)(?:[\s,.;:!?]+)?(?:нажми\s+enter|нажать\s+enter|press\s+enter)\s*[.!?]?\s*$",
+    )
+    .unwrap();
+    if !re.is_match(text) {
+        return false;
+    }
+    *text = re.replace(text, "").trim_end().to_string();
+    true
+}
+
+fn backtrack(text: &str) -> String {
+    // Deliberately narrow: only an explicit correction of a numeric time/quantity.
+    // "Я вообще-то дома" must remain untouched.
+    let re = regex::Regex::new(
+        r"(?i)\b(в|на|к)\s+(\d+)\s*,?\s*(?:нет|точнее|вернее)\s*,?\s*(?:(?:в|на|к)\s+)?(\d+)\b",
+    )
+    .unwrap();
+    re.replace_all(text, "$1 $3").into_owned()
+}
+
+fn numbered_list(text: &str) -> String {
+    let re = regex::Regex::new(r"(?i)\bперв(?:ое|ый)\s+(.+?)\s+втор(?:ое|ой)\s+(.+)$").unwrap();
+    re.replace(text, "1. $1\n2. $2").into_owned()
+}
+
+fn normalize_format_whitespace(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            collapse_ws(line)
+                .replace(" ,", ",")
+                .replace(" .", ".")
+                .replace(" !", "!")
+                .replace(" ?", "?")
+                .replace(" :", ":")
+                .replace(" ;", ";")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\n \n", "\n\n")
+        .trim()
+        .to_string()
+}
+
 /// Heuristic fallback when GGUF model is missing (keeps shell usable).
 pub struct HeuristicCleanup;
 
@@ -29,6 +107,44 @@ pub fn heuristic_polish(raw: &str, ctx: &DictationContext) -> String {
     t = asr_homophone_fix(&t, ctx);
     t = collapse_ws(&t);
     capitalize_sentence(&t)
+}
+
+/// Reject cleanup that likely summarized or hallucinated instead of polishing ASR.
+/// Short utterances stay permissive because a single dictionary correction changes
+/// every token (for example, "газового вода" → "голосового ввода").
+pub fn accepts_cleanup(raw: &str, candidate: &str, ctx: &DictationContext) -> bool {
+    let raw = asr_homophone_fix(raw, ctx);
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+
+    let raw_words = meaningful_words(&raw);
+    if candidate.chars().count() * 100 < raw.chars().count() * 45 {
+        return false;
+    }
+    if raw_words.len() <= 4 {
+        return true;
+    }
+
+    let candidate_words = meaningful_words(candidate);
+    if candidate_words.len() < 2 {
+        return false;
+    }
+
+    let retained = raw_words
+        .iter()
+        .filter(|word| candidate_words.iter().any(|candidate| candidate == *word))
+        .count();
+    retained * 100 >= raw_words.len() * 60
+}
+
+fn meaningful_words(text: &str) -> Vec<String> {
+    const FILLERS: &[&str] = &["ну", "типа", "ээ", "эм", "hmm", "uh", "like"];
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(|word| word.to_lowercase())
+        .filter(|word| word.len() > 1 && !FILLERS.contains(&word.as_str()))
+        .collect()
 }
 
 /// Deterministic Whisper-RU fixes. Applied after Qwen too — model often keeps these.

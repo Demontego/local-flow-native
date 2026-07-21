@@ -503,6 +503,7 @@ version = "0.1.0"
 dependencies = [
  "local-flow-core",
  "parking_lot",
+ "serde_json",
  "thiserror",
  "tracing",
  "uniffi",

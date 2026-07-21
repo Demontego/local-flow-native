@@ -6,6 +6,39 @@ import CoreGraphics
 enum Permissions {
     private static let axSettingsOpenedKey = "lwf.axSettingsOpenedOnce"
 
+    enum OnboardingStep: Equatable {
+        case requestMicrophone
+        case openMicrophoneSettings
+        case openAccessibilitySettings
+        case ready
+
+        var message: String {
+            switch self {
+            case .requestMicrophone:
+                "Allow Microphone to dictate"
+            case .openMicrophoneSettings:
+                "Microphone is off. Enable it in System Settings"
+            case .openAccessibilitySettings:
+                "Enable Accessibility to paste into any app"
+            case .ready:
+                "Ready — hold Ctrl+Option (or LF)"
+            }
+        }
+
+        var actionTitle: String? {
+            switch self {
+            case .requestMicrophone:
+                "Allow Microphone"
+            case .openMicrophoneSettings:
+                "Open Microphone Settings"
+            case .openAccessibilitySettings:
+                "Open Accessibility Settings"
+            case .ready:
+                nil
+            }
+        }
+    }
+
     static func isAccessibilityTrusted() -> Bool {
         // Silent check — never pass prompt:true here (that dialog every launch).
         AXIsProcessTrusted()
@@ -50,6 +83,32 @@ enum Permissions {
             AVCaptureDevice.requestAccess(for: .audio, completionHandler: done)
         default:
             done(false)
+        }
+    }
+
+    static func onboardingStep() -> OnboardingStep {
+        switch micStatus() {
+        case .notDetermined:
+            return .requestMicrophone
+        case .authorized:
+            return isAccessibilityTrusted() ? .ready : .openAccessibilitySettings
+        default:
+            return .openMicrophoneSettings
+        }
+    }
+
+    static func perform(_ step: OnboardingStep, done: @escaping () -> Void) {
+        switch step {
+        case .requestMicrophone:
+            requestMicrophone { _ in
+                DispatchQueue.main.async { done() }
+            }
+        case .openMicrophoneSettings:
+            openMicrophoneSettings()
+        case .openAccessibilitySettings:
+            openAccessibilitySettings()
+        case .ready:
+            break
         }
     }
 

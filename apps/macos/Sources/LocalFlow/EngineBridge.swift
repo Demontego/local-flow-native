@@ -23,6 +23,30 @@ final class EngineBridge {
         return String(cString: c)
     }
 
+    func personalization() -> PersonalizationSettings {
+        guard let c = lf_engine_personalization_json(handle) else { return .default }
+        defer { lf_string_free(c) }
+        return (try? JSONDecoder().decode(
+            PersonalizationSettings.self,
+            from: Data(String(cString: c).utf8)
+        )) ?? .default
+    }
+
+    func savePersonalization(_ settings: PersonalizationSettings) -> String {
+        guard let data = try? JSONEncoder().encode(settings),
+              let json = String(data: data, encoding: .utf8),
+              let c = lf_engine_save_personalization_json(handle, json)
+        else { return "error: encode personalization" }
+        defer { lf_string_free(c) }
+        return String(cString: c)
+    }
+
+    func recent(for bundleID: String) -> [String] {
+        guard let c = lf_engine_recent_json(handle, bundleID) else { return [] }
+        defer { lf_string_free(c) }
+        return (try? JSONDecoder().decode([String].self, from: Data(String(cString: c).utf8))) ?? []
+    }
+
     func downloadWhisper(progress: DownloadProgressCtx) -> String {
         download(progress: progress, title: "Whisper", fn: lf_engine_download_whisper)
     }
@@ -74,16 +98,24 @@ final class EngineBridge {
         return String(cString: c)
     }
 
-    func endHold(ctx: DictationCtx) -> (raw: String, clean: String) {
+    func endHold(ctx: DictationCtx) -> (raw: String, clean: String, pressEnter: Bool) {
         let cCtx = ctx.toC()
         defer { lf_context_free(cCtx) }
         guard let res = lf_engine_end_hold(handle, cCtx) else {
-            return ("", "")
+            return ("", "", false)
         }
         defer { lf_session_result_free(res) }
         let raw = res.pointee.raw.map { String(cString: $0) } ?? ""
         let clean = res.pointee.clean.map { String(cString: $0) } ?? ""
-        return (raw, clean)
+        return (raw, clean, res.pointee.press_enter != 0)
+    }
+
+    func cleanupText(_ text: String, ctx: DictationCtx) -> String {
+        let cCtx = ctx.toC()
+        defer { lf_context_free(cCtx) }
+        guard let c = lf_engine_cleanup_text(handle, text, cCtx) else { return "error: cleanup" }
+        defer { lf_string_free(c) }
+        return String(cString: c)
     }
 }
 

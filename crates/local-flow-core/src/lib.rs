@@ -7,6 +7,7 @@ pub mod context;
 pub mod error;
 pub mod history;
 pub mod models;
+pub mod personalization;
 pub mod session;
 
 pub use asr::AsrEngine;

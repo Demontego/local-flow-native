@@ -16,9 +16,7 @@ pub enum FlowError {
 
 impl From<local_flow_core::Error> for FlowError {
     fn from(e: local_flow_core::Error) -> Self {
-        Self::Message {
-            msg: e.to_string(),
-        }
+        Self::Message { msg: e.to_string() }
     }
 }
 
@@ -27,7 +25,7 @@ pub fn library_version() -> String {
     local_flow_core::VERSION.to_string()
 }
 
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, Default)]
 pub struct FfiContext {
     pub app_name: String,
     pub bundle_id: String,
@@ -50,6 +48,7 @@ impl From<FfiContext> for DictationContext {
             chat_lines: c.chat_lines,
             recent: c.recent,
             screenshot_path: c.screenshot_path,
+            ..Default::default()
         }
     }
 }
@@ -66,6 +65,7 @@ pub struct FfiModelsStatus {
 pub struct FfiSessionResult {
     pub raw: String,
     pub clean: String,
+    pub press_enter: bool,
 }
 
 #[derive(uniffi::Object)]
@@ -125,6 +125,7 @@ impl LocalFlowEngine {
         Ok(FfiSessionResult {
             raw: r.raw,
             clean: r.clean,
+            press_enter: r.press_enter,
         })
     }
 
@@ -138,6 +139,23 @@ impl LocalFlowEngine {
 
     pub fn backend_summary(&self) -> String {
         self.summary.lock().clone()
+    }
+
+    pub fn personalization_json(&self) -> Result<String, FlowError> {
+        serde_json::to_string_pretty(&self.inner.personalization())
+            .map_err(|e| FlowError::Message { msg: e.to_string() })
+    }
+
+    pub fn save_personalization_json(&self, json: String) -> Result<(), FlowError> {
+        let settings = serde_json::from_str(&json).map_err(|e| FlowError::Message {
+            msg: format!("invalid personalization: {e}"),
+        })?;
+        Ok(self.inner.save_personalization(&settings)?)
+    }
+
+    pub fn recent_json(&self, bundle_id: String) -> Result<String, FlowError> {
+        serde_json::to_string(&self.inner.recent_for(&bundle_id))
+            .map_err(|e| FlowError::Message { msg: e.to_string() })
     }
 }
 

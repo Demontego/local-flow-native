@@ -22,19 +22,20 @@ pub struct LFContext {
 pub struct LFSessionResult {
     pub raw: *mut c_char,
     pub clean: *mut c_char,
+    pub press_enter: c_int,
 }
 
 fn cstr_to_string(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    unsafe { CStr::from_ptr(p) }
-        .to_string_lossy()
-        .into_owned()
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
 fn to_cstring(s: &str) -> *mut c_char {
-    CString::new(s).map(|c| c.into_raw()).unwrap_or(ptr::null_mut())
+    CString::new(s)
+        .map(|c| c.into_raw())
+        .unwrap_or(ptr::null_mut())
 }
 
 fn context_from_c(c: *const LFContext) -> FfiContext {
@@ -48,6 +49,7 @@ fn context_from_c(c: *const LFContext) -> FfiContext {
             chat_lines: vec![],
             recent: vec![],
             screenshot_path: None,
+            ..Default::default()
         };
     }
     let c = unsafe { &*c };
@@ -71,6 +73,7 @@ fn context_from_c(c: *const LFContext) -> FfiContext {
             recent.lines().map(|s| s.to_string()).collect()
         },
         screenshot_path: if shot.is_empty() { None } else { Some(shot) },
+        ..Default::default()
     }
 }
 
@@ -114,6 +117,45 @@ pub extern "C" fn lf_engine_load_models(ptr: *mut LocalFlowEngine) -> *mut c_cha
     };
     match e.load_models() {
         Ok(s) => to_cstring(&s),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_personalization_json(ptr: *mut LocalFlowEngine) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("{}");
+    };
+    match e.personalization_json() {
+        Ok(json) => to_cstring(&json),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_save_personalization_json(
+    ptr: *mut LocalFlowEngine,
+    json: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("error: null engine");
+    };
+    match e.save_personalization_json(cstr_to_string(json)) {
+        Ok(()) => to_cstring("ok"),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_recent_json(
+    ptr: *mut LocalFlowEngine,
+    bundle_id: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("[]");
+    };
+    match e.recent_json(cstr_to_string(bundle_id)) {
+        Ok(json) => to_cstring(&json),
         Err(err) => to_cstring(&format!("error: {err}")),
     }
 }
@@ -218,11 +260,32 @@ pub extern "C" fn lf_engine_end_hold(
         Ok(r) => Box::into_raw(Box::new(LFSessionResult {
             raw: to_cstring(&r.raw),
             clean: to_cstring(&r.clean),
+            press_enter: i32::from(r.press_enter),
         })),
         Err(err) => Box::into_raw(Box::new(LFSessionResult {
             raw: to_cstring(&format!("error: {err}")),
             clean: to_cstring(""),
+            press_enter: 0,
         })),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_cleanup_text(
+    ptr: *mut LocalFlowEngine,
+    raw: *const c_char,
+    ctx: *const LFContext,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("error: null engine");
+    };
+    let raw = cstr_to_string(raw);
+    if raw.trim().is_empty() {
+        return to_cstring("error: select text first");
+    }
+    match e.cleanup_text(raw, context_from_c(ctx)) {
+        Ok(text) => to_cstring(&text),
+        Err(err) => to_cstring(&format!("error: {err}")),
     }
 }
 

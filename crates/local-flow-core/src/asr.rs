@@ -2,6 +2,13 @@ use crate::error::{Error, Result};
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transcription {
+    pub text: String,
+    /// Mean probability of Whisper's decoded text tokens, when the backend exposes it.
+    pub mean_token_probability: Option<f32>,
+}
+
 pub trait AsrBackend: Send + Sync {
     fn transcribe(
         &self,
@@ -9,7 +16,7 @@ pub trait AsrBackend: Send + Sync {
         language: &str,
         initial_prompt: Option<&str>,
         beam_size: usize,
-    ) -> Result<String>;
+    ) -> Result<Transcription>;
 }
 
 /// Echo backend for tests / missing models.
@@ -22,8 +29,11 @@ impl AsrBackend for StubAsr {
         _language: &str,
         _initial_prompt: Option<&str>,
         _beam_size: usize,
-    ) -> Result<String> {
-        Ok(String::new())
+    ) -> Result<Transcription> {
+        Ok(Transcription {
+            text: String::new(),
+            mean_token_probability: None,
+        })
     }
 }
 
@@ -63,7 +73,7 @@ impl AsrEngine {
         language: &str,
         initial_prompt: Option<&str>,
         beam_size: usize,
-    ) -> Result<String> {
+    ) -> Result<Transcription> {
         // whisper.cpp rejects clips < 1000 ms
         let min_len = 16_000; // 1.0 s @ 16 kHz
         let pcm: Vec<f32> = if pcm_f32.len() < min_len {
@@ -75,7 +85,10 @@ impl AsrEngine {
         };
         self.inner
             .transcribe(&pcm, language, initial_prompt, beam_size)
-            .map(|s| s.trim().to_string())
+            .map(|mut result| {
+                result.text = result.text.trim().to_string();
+                result
+            })
     }
 }
 
@@ -92,7 +105,9 @@ mod whisper_backend {
     impl WhisperAsr {
         pub fn load(model: &Path) -> Result<Self> {
             let ctx = WhisperContext::new_with_params(
-                model.to_str().ok_or_else(|| Error::msg("non-utf8 model path"))?,
+                model
+                    .to_str()
+                    .ok_or_else(|| Error::msg("non-utf8 model path"))?,
                 WhisperContextParameters::default(),
             )
             .map_err(|e| Error::Asr(format!("load whisper: {e}")))?;
@@ -109,7 +124,7 @@ mod whisper_backend {
             language: &str,
             initial_prompt: Option<&str>,
             beam_size: usize,
-        ) -> Result<String> {
+        ) -> Result<Transcription> {
             let ctx = self.ctx.lock();
             let mut state = ctx
                 .create_state()
@@ -138,6 +153,8 @@ mod whisper_backend {
                 .full_n_segments()
                 .map_err(|e| Error::Asr(format!("segments: {e}")))?;
             let mut out = String::new();
+            let mut probability_sum = 0.0;
+            let mut probability_count = 0_u32;
             for i in 0..n {
                 let seg = state
                     .full_get_segment_text(i)
@@ -146,8 +163,24 @@ mod whisper_backend {
                     out.push(' ');
                 }
                 out.push_str(seg.trim());
+                let tokens = state
+                    .full_n_tokens(i)
+                    .map_err(|e| Error::Asr(format!("tokens: {e}")))?;
+                for token in 0..tokens {
+                    let probability = state
+                        .full_get_token_prob(i, token)
+                        .map_err(|e| Error::Asr(format!("token probability: {e}")))?;
+                    if probability.is_finite() {
+                        probability_sum += probability;
+                        probability_count += 1;
+                    }
+                }
             }
-            Ok(out)
+            Ok(Transcription {
+                text: out,
+                mean_token_probability: (probability_count > 0)
+                    .then(|| probability_sum / probability_count as f32),
+            })
         }
     }
 }

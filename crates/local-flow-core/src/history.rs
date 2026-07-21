@@ -38,7 +38,8 @@ pub fn save_recent(cache: &Path, bundle_id: &str, text: &str) -> Result<()> {
     if items.len() > LIMIT {
         items.drain(0..items.len() - LIMIT);
     }
-    let data = serde_json::to_string_pretty(&items).map_err(|e| crate::Error::msg(e.to_string()))?;
+    let data =
+        serde_json::to_string_pretty(&items).map_err(|e| crate::Error::msg(e.to_string()))?;
     fs::write(path_for(cache, bundle_id), data)?;
     Ok(())
 }

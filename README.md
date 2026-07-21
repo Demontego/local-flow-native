@@ -46,6 +46,39 @@ Cache: `~/.cache/local-flow-native/models/`
 - Then **Load models**. Without Qwen, cleanup uses a small heuristic.
 - Context: Accessibility (AX) from the frontmost app — no vision/screenshot path.
 
+## Local personalization
+
+The menubar menu provides local-only controls:
+
+- **Add dictionary replacement…** corrects repeat ASR mistakes and biases Whisper toward the
+  corrected vocabulary.
+- **Add voice snippet…** expands a spoken phrase into exact saved text after cleanup.
+- **Set writing style for focused app…** chooses concise technical, casual, or neutral phrasing
+  per application.
+- **Command: polish selected text** replaces the selected text using the existing cleanup model.
+- **Toggle live typing**, **Toggle app context capture**, and **Toggle cleanup** make the
+  sensitive or disruptive parts opt-in.
+- Spoken formatting is local and deterministic: say **запятая**, **точка**, **новая строка**,
+  **новый абзац**, or end with **нажми enter**. Clear numeric corrections such as
+  “в 2, нет, в 3” become “в 3”.
+- **Undo last Local Flow paste** is available for 30 seconds only when focus and the caret still
+  immediately follow the inserted text. **Retry last Local Flow paste** retries an Accessibility
+  failure without changing focus.
+
+Rules, snippets, profiles, and the cleanup toggle are stored locally at
+`~/.cache/local-flow-native/personalization.json`; no account or sync service is used.
+
+## Quality checks
+
+```bash
+cargo test -p local-flow-core --test heuristic -- --skip qwen_cleanup
+make macos
+```
+
+The regression suite covers deterministic Russian homophone repairs, dictionary replacement,
+snippet expansion, and core session transitions. Before a release, manually verify dictation,
+selected-text polish, spacing, and paste in Cursor, Telegram, a browser, and a native text field.
+
 ## Hotkey (macOS)
 
 Hold **Ctrl+Option** → speak → release → cleaned text pasted.

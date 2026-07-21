@@ -11,6 +11,10 @@ pub struct DictationContext {
     pub chat_lines: Vec<String>,
     pub recent: Vec<String>,
     pub screenshot_path: Option<String>,
+    #[serde(default)]
+    pub custom_vocabulary: Vec<String>,
+    #[serde(default)]
+    pub writing_style: String,
 }
 
 impl DictationContext {
@@ -35,11 +39,8 @@ impl DictationContext {
     }
 
     pub fn is_editor(&self) -> bool {
-        let blob = format!(
-            "{} {} {}",
-            self.app_name, self.bundle_id, self.channel_hint
-        )
-        .to_lowercase();
+        let blob =
+            format!("{} {} {}", self.app_name, self.bundle_id, self.channel_hint).to_lowercase();
         [
             "cursor",
             "todesktop",
@@ -127,9 +128,8 @@ impl DictationContext {
             parts.push(format!("Selected text: {:?}", self.selected_text));
         }
         if !self.chat_lines.is_empty() {
-            parts.push(
-                "Visible UI / messages / editor context (names, topics, homophones):".into(),
-            );
+            parts
+                .push("Visible UI / messages / editor context (names, topics, homophones):".into());
             for line in self.chat_lines.iter().rev().take(8).rev() {
                 let short: String = line.chars().take(160).collect();
                 parts.push(format!("- {short}"));
@@ -141,6 +141,12 @@ impl DictationContext {
                 parts.push(format!("- {line}"));
             }
         }
+        if !self.writing_style.is_empty() {
+            parts.push(format!(
+                "Writing style for this app: {}",
+                self.writing_style
+            ));
+        }
         parts.push(
             "Adapt wording to this surface (casual chat vs code/editor vs docs). Keep spaces between words."
                 .into(),
@@ -148,18 +154,23 @@ impl DictationContext {
         parts.join("\n")
     }
 
-    /// Bias whisper `initial_prompt`. Keep short — chat UI dumps crowd out the bias.
+    /// Keep Whisper's prompt to vocabulary and local context, never a canned phrase.
     pub fn asr_initial_prompt(&self) -> Option<String> {
         let mut bits: Vec<String> = Vec::new();
-        // First: high-value vocab (Whisper small RU: голосовой→газовый, ввод→вода).
-        if self.is_editor() {
+        if !self.custom_vocabulary.is_empty() {
             bits.push(
-                "Проверка голосового ввода в Cursor. Диктовка код коммит файл.".into(),
+                self.custom_vocabulary
+                    .iter()
+                    .take(16)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" "),
             );
+        }
+        if self.is_editor() {
+            bits.push("код сервис коммит файл".into());
         } else if self.is_tech_chat() {
-            bits.push("Голосовой ввод. Код сервис деплой логи коммит PR.".into());
-        } else {
-            bits.push("Голосовой ввод диктовка проверка.".into());
+            bits.push("код сервис деплой логи коммит PR".into());
         }
         if !self.channel_hint.is_empty() {
             bits.push(self.channel_hint.chars().take(80).collect());
@@ -167,10 +178,7 @@ impl DictationContext {
         if !self.before_text.is_empty() {
             bits.push(self.before_text.trim().chars().take(80).collect());
         }
-        for r in self.recent.iter().rev().take(2).rev() {
-            bits.push(r.chars().take(60).collect());
-        }
         let joined = bits.join(" ");
-        Some(joined.chars().take(220).collect())
+        (!joined.trim().is_empty()).then(|| joined.chars().take(160).collect())
     }
 }

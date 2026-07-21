@@ -5,7 +5,10 @@ use crate::context::DictationContext;
 use crate::error::{Error, Result};
 use crate::history;
 use crate::models::{self, ModelsStatus};
+use crate::personalization;
 use parking_lot::Mutex;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +23,8 @@ pub enum SessionPhase {
 pub struct SessionResult {
     pub raw: String,
     pub clean: String,
+    pub asr_confidence: Option<f32>,
+    pub press_enter: bool,
     pub phase: SessionPhase,
 }
 
@@ -72,25 +77,25 @@ impl Engine {
                 (AsrEngine::stub(), Some(format!("whisper_err={e}")))
             }
         };
-        let (cleanup, llm_note) = match CleanupEngine::load(&self.cfg.llm_model, &self.cfg.cleanup_prompt)
-        {
-            Ok(c) => (c, None),
-            Err(e) => {
-                tracing::warn!("llm load failed, heuristic: {e}");
-                // Keep a previously loaded Qwen if reload failed (e.g. race).
-                if let Some(prev) = self.cleanup.lock().as_ref() {
-                    if prev.backend_name == "qwen3" {
-                        let summary = format!(
-                            "asr={} cleanup=qwen3 (reload skipped: {e})",
-                            asr.backend_name
-                        );
-                        *self.asr.lock() = Some(asr);
-                        return Ok(summary);
+        let (cleanup, llm_note) =
+            match CleanupEngine::load(&self.cfg.llm_model, &self.cfg.cleanup_prompt) {
+                Ok(c) => (c, None),
+                Err(e) => {
+                    tracing::warn!("llm load failed, heuristic: {e}");
+                    // Keep a previously loaded Qwen if reload failed (e.g. race).
+                    if let Some(prev) = self.cleanup.lock().as_ref() {
+                        if prev.backend_name == "qwen3" {
+                            let summary = format!(
+                                "asr={} cleanup=qwen3 (reload skipped: {e})",
+                                asr.backend_name
+                            );
+                            *self.asr.lock() = Some(asr);
+                            return Ok(summary);
+                        }
                     }
+                    (CleanupEngine::heuristic(), Some(format!("llm_err={e}")))
                 }
-                (CleanupEngine::heuristic(), Some(format!("llm_err={e}")))
-            }
-        };
+            };
         let mut summary = format!("asr={} cleanup={}", asr.backend_name, cleanup.backend_name);
         if let Some(n) = asr_note {
             summary.push(' ');
@@ -141,6 +146,7 @@ impl Engine {
             return Ok(String::new());
         }
         asr.transcribe(&pcm, &self.cfg.language, None, 1)
+            .map(|result| result.text)
     }
 
     pub fn end_hold(&self, mut ctx: DictationContext) -> Result<SessionResult> {
@@ -153,6 +159,8 @@ impl Engine {
         }
 
         let outcome = (|| -> Result<SessionResult> {
+            let personalization = personalization::load(&self.cfg.cache_dir);
+            personalization::apply_context(&mut ctx, &personalization);
             if ctx.recent.is_empty() && !ctx.bundle_id.is_empty() {
                 ctx.recent = history::load_recent(&self.cfg.cache_dir, &ctx.bundle_id);
             }
@@ -164,46 +172,79 @@ impl Engine {
                 return Ok(SessionResult {
                     raw: format!("empty:audio={secs:.2}s (need ≥0.35s)"),
                     clean: String::new(),
+                    asr_confidence: None,
+                    press_enter: false,
                     phase: SessionPhase::Idle,
                 });
             }
 
             let prompt = ctx.asr_initial_prompt();
-            let raw = {
+            let transcription = {
                 let asr = self.asr.lock();
                 let asr = asr.as_ref().ok_or(Error::ModelsNotLoaded)?;
                 asr.transcribe(&pcm, &self.cfg.language, prompt.as_deref(), 5)?
             };
+            let raw = transcription.text;
+            let asr_confidence = transcription.mean_token_probability;
 
             if raw.trim().is_empty() {
                 return Ok(SessionResult {
                     raw: format!("empty:whisper audio={secs:.2}s"),
                     clean: String::new(),
+                    asr_confidence,
+                    press_enter: false,
                     phase: SessionPhase::Idle,
                 });
             }
 
             *self.phase.lock() = SessionPhase::Cleaning;
-            let clean = {
+            let (clean, cleanup_decision) = if personalization.cleanup_enabled {
                 let cleanup = self.cleanup.lock();
                 let cleanup = cleanup.as_ref().ok_or(Error::ModelsNotLoaded)?;
                 match cleanup.cleanup(&raw, &ctx) {
-                    Ok(c) if !c.trim().is_empty() => c,
-                    Ok(_) => crate::cleanup::heuristic_polish(&raw, &ctx),
+                    Ok(candidate) if crate::cleanup::accepts_cleanup(&raw, &candidate, &ctx) => {
+                        (candidate, "qwen")
+                    }
+                    Ok(candidate) => {
+                        log_quality(
+                            &self.cfg,
+                            &raw,
+                            &candidate,
+                            "guarded fallback",
+                            asr_confidence,
+                        );
+                        (
+                            crate::cleanup::heuristic_polish(&raw, &ctx),
+                            "guarded fallback",
+                        )
+                    }
                     Err(e) => {
                         tracing::warn!("cleanup failed, heuristic fallback: {e}");
-                        crate::cleanup::heuristic_polish(&raw, &ctx)
+                        (
+                            crate::cleanup::heuristic_polish(&raw, &ctx),
+                            "error fallback",
+                        )
                     }
                 }
+            } else {
+                (raw.clone(), "disabled")
             };
+            let smart = crate::cleanup::smart_format(&clean);
+            let clean = personalization::expand_snippets(
+                &personalization::apply_replacements(&smart.text, &personalization),
+                &personalization,
+            );
 
             if !clean.is_empty() && !ctx.bundle_id.is_empty() {
                 let _ = history::save_recent(&self.cfg.cache_dir, &ctx.bundle_id, &clean);
             }
+            log_quality(&self.cfg, &raw, &clean, cleanup_decision, asr_confidence);
 
             Ok(SessionResult {
                 raw,
                 clean,
+                asr_confidence,
+                press_enter: smart.press_enter,
                 phase: SessionPhase::Idle,
             })
         })();
@@ -227,6 +268,53 @@ impl Engine {
         let cleanup = self.cleanup.lock();
         let cleanup = cleanup.as_ref().ok_or(Error::ModelsNotLoaded)?;
         cleanup.cleanup(raw, ctx)
+    }
+
+    pub fn personalization(&self) -> personalization::Personalization {
+        personalization::load(&self.cfg.cache_dir)
+    }
+
+    pub fn save_personalization(&self, settings: &personalization::Personalization) -> Result<()> {
+        personalization::save(&self.cfg.cache_dir, settings)
+    }
+
+    pub fn recent_for(&self, bundle_id: &str) -> Vec<String> {
+        history::load_recent(&self.cfg.cache_dir, bundle_id)
+    }
+}
+
+fn log_quality(
+    cfg: &EngineConfig,
+    raw: &str,
+    candidate: &str,
+    decision: &str,
+    confidence: Option<f32>,
+) {
+    fn cap(text: &str) -> String {
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut clipped: String = compact.chars().take(200).collect();
+        if compact.chars().count() > clipped.chars().count() {
+            clipped.push('…');
+        }
+        clipped.replace('"', "'")
+    }
+
+    let path = cfg.cache_dir.join("paste.log");
+    if std::fs::create_dir_all(&cfg.cache_dir).is_err() {
+        return;
+    }
+    let confidence = confidence
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".into());
+    let line = format!(
+        "asr_quality confidence={confidence} decision={decision:?} raw_len={} candidate_len={} raw={:?} candidate={:?}\n",
+        raw.chars().count(),
+        candidate.chars().count(),
+        cap(raw),
+        cap(candidate),
+    );
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

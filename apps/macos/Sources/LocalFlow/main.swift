@@ -6,10 +6,12 @@ import Foundation
 
 @main
 struct LocalFlowAppMain {
+    // NSApplication keeps its delegate weakly; retain it for the whole process.
+    private static let delegate = AppDelegate()
+
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
     }
@@ -29,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set when hold started via LF menubar (focus stolen); nil for Ctrl+Option.
     private var restoreAppAfterPaste: NSRunningApplication?
     private var appActivateObserver: NSObjectProtocol?
+    private var permissionPollTimer: Timer?
     /// Text we actually typed into the field (append-only during hold).
     private var liveCommitted = ""
     private var liveBusy = false
@@ -36,6 +39,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var holdContext = DictationCtx()
     /// Char before caret was a word → insert leading space on first paste.
     private var needsLeadingSpace = false
+    private var liveTypingEnabled: Bool {
+        UserDefaults.standard.object(forKey: "liveTypingEnabled") as? Bool ?? true
+    }
+    private var contextCaptureEnabled: Bool {
+        UserDefaults.standard.object(forKey: "contextCaptureEnabled") as? Bool ?? true
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlay = OverlayController()
@@ -53,6 +62,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Load models", action: #selector(loadModels), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Download Whisper", action: #selector(downloadWhisper), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Download Qwen3 (1.7B ~1GB)", action: #selector(downloadQwen), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Add dictionary replacement…", action: #selector(addDictionaryRule), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Add voice snippet…", action: #selector(addSnippet), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Set writing style for focused app…", action: #selector(setWritingStyle), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Toggle cleanup", action: #selector(toggleCleanup), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Command: polish selected text", action: #selector(polishSelectedText), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Personalization summary", action: #selector(showPersonalization), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Recent dictation for focused app", action: #selector(showRecentDictation), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Toggle live typing", action: #selector(toggleLiveTyping), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Toggle app context capture", action: #selector(toggleContextCapture), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Undo last Local Flow paste", action: #selector(undoLastPaste), keyEquivalent: "z"))
+        menu.addItem(NSMenuItem(title: "Retry last Local Flow paste", action: #selector(retryLastPaste), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Microphone settings", action: #selector(openMic), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAccessibility), keyEquivalent: ""))
@@ -74,9 +96,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s = self?.engine.loadModels() ?? "fail"
             DispatchQueue.main.async {
                 self?.modelsReady = s.contains("asr=whisper")
-                self?.overlay.show(self?.readyMessage(models: s) ?? s)
+                if Permissions.onboardingStep() == .ready {
+                    self?.overlay.show(self?.readyMessage(models: s) ?? s)
+                } else {
+                    self?.refreshPermissionOnboarding()
+                }
             }
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Cmd+Q / Apple events bypass our menu action. ggml Metal can abort in
+        // its C++ static destructors, so use the same intentional fast exit.
+        Darwin._exit(0)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Darwin._exit(0)
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshPermissionOnboarding()
     }
 
     private func trackFrontmostApps() {
@@ -90,6 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { return }
             if Self.isPasteableApp(app) {
                 self?.lastUserApp = app
+            }
+            if app.bundleIdentifier == Bundle.main.bundleIdentifier {
+                self?.refreshPermissionOnboarding()
             }
         }
     }
@@ -132,19 +175,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bootstrapPermissionsThenArm() {
-        // Hotkey uses flagsState poll — no Input Monitoring. No AX modal on launch.
+        // Hotkey uses flagsState poll — no Input Monitoring permission required.
         _ = hotkey.start()
-        Permissions.requestMicrophone { [weak self] micOk in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if !micOk {
-                    self.overlay.show("Allow Microphone for Local Whisper Flow\n(right-click LF → Microphone)")
-                } else if !Permissions.isAccessibilityTrusted() {
-                    self.overlay.show(
-                        "Ready — hold Ctrl+Option (or LF).\nFor auto-paste: enable Accessibility once"
-                    )
-                }
+        refreshPermissionOnboarding(requestMicrophoneIfNeeded: true)
+    }
+
+    private func refreshPermissionOnboarding(requestMicrophoneIfNeeded: Bool = false) {
+        let step = Permissions.onboardingStep()
+        if step == .ready {
+            permissionPollTimer?.invalidate()
+            permissionPollTimer = nil
+            overlay.show(
+                modelsReady
+                    ? "Ready — Ctrl+Option or LF"
+                    : "Permissions ready — loading models…"
+            )
+            return
+        }
+        if step == .requestMicrophone, requestMicrophoneIfNeeded {
+            Permissions.perform(step) { [weak self] in
+                self?.refreshPermissionOnboarding()
             }
+            return
+        }
+        guard let actionTitle = step.actionTitle else { return }
+        overlay.showPermission(message: step.message, actionTitle: actionTitle) { [weak self] in
+            guard let self else { return }
+            Permissions.perform(step) {
+                self.refreshPermissionOnboarding()
+            }
+            self.startPermissionPolling()
+        }
+    }
+
+    private func startPermissionPolling() {
+        guard permissionPollTimer == nil else { return }
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
+            [weak self] _ in self?.refreshPermissionOnboarding()
         }
     }
 
@@ -162,23 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func retryPermissions() {
         overlay.wake()
         _ = hotkey.rearm()
-        if !Permissions.isAccessibilityTrusted() {
-            Permissions.openAccessibilitySettings()
-        }
-        Permissions.requestMicrophone { [weak self] micOk in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if !micOk {
-                    self.overlay.show("Microphone still denied")
-                    Permissions.openMicrophoneSettings()
-                } else {
-                    let ax = Permissions.isAccessibilityTrusted()
-                        ? "paste OK"
-                        : "enable Accessibility for paste"
-                    self.overlay.show("Hotkey armed — hold Ctrl+Option\n\(ax)")
-                }
-            }
-        }
+        refreshPermissionOnboarding(requestMicrophoneIfNeeded: true)
     }
 
     @objc private func loadModels() {
@@ -186,7 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s = self?.engine.loadModels() ?? "fail"
             DispatchQueue.main.async {
                 self?.modelsReady = s.contains("asr=whisper")
-                self?.overlay.show("Loaded: \(s)")
+                if Permissions.onboardingStep() == .ready {
+                    self?.overlay.show("Loaded: \(s)")
+                } else {
+                    self?.refreshPermissionOnboarding()
+                }
             }
         }
     }
@@ -232,6 +287,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openMic() { Permissions.openMicrophoneSettings() }
     @objc private func openAccessibility() { Permissions.openAccessibilitySettings() }
     @objc private func openInputMonitoring() { Permissions.openInputMonitoringSettings() }
+
+    @objc private func addDictionaryRule() {
+        if let result = PersonalizationEditor.addDictionaryRule(engine: engine) {
+            overlay.show(result == "ok" ? "Dictionary replacement saved" : result)
+        }
+    }
+
+    @objc private func addSnippet() {
+        if let result = PersonalizationEditor.addSnippet(engine: engine) {
+            overlay.show(result == "ok" ? "Voice snippet saved" : result)
+        }
+    }
+
+    @objc private func setWritingStyle() {
+        if let result = PersonalizationEditor.setStyle(
+            engine: engine,
+            app: Self.usableFrontmost() ?? lastUserApp
+        ) {
+            overlay.show(result == "ok" ? "Writing style saved" : result)
+        }
+    }
+
+    @objc private func toggleCleanup() {
+        let result = PersonalizationEditor.toggleCleanup(engine: engine)
+        overlay.show(result == "ok" ? PersonalizationEditor.summary(engine: engine) : result)
+    }
+
+    @objc private func showPersonalization() {
+        overlay.show(PersonalizationEditor.summary(engine: engine))
+    }
+
+    @objc private func showRecentDictation() {
+        guard let bundleID = (Self.usableFrontmost() ?? lastUserApp)?.bundleIdentifier else {
+            overlay.show("Focus an app first")
+            return
+        }
+        let recent = engine.recent(for: bundleID)
+        overlay.show(recent.isEmpty ? "No recent dictation for this app" : recent.suffix(5).joined(separator: "\n"))
+    }
+
+    @objc private func polishSelectedText() {
+        let ctx = ContextCollector.gather()
+        let selected = ctx.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty else {
+            overlay.show("Select text first")
+            return
+        }
+        let restore = Self.usableFrontmost() ?? lastUserApp
+        overlay.show("Polishing selection…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let output = self.engine.cleanupText(selected, ctx: ctx)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !output.isEmpty, !output.hasPrefix("error:") else {
+                DispatchQueue.main.async { self.overlay.show(output.isEmpty ? "No result" : output) }
+                return
+            }
+            _ = Pasteboard.commitFinal(
+                replacing: "",
+                with: output,
+                needsLeadingSpace: false,
+                restoreApp: restore,
+                recordUndo: false
+            ) { [weak self] in
+                self?.overlay.hideForPaste()
+            }
+            DispatchQueue.main.async {
+                self.overlay.wake()
+                self.overlay.show(output)
+            }
+        }
+    }
+
+    @objc private func toggleLiveTyping() {
+        let enabled = !liveTypingEnabled
+        UserDefaults.standard.set(enabled, forKey: "liveTypingEnabled")
+        overlay.show("Live typing: \(enabled ? "on" : "off")")
+    }
+
+    @objc private func toggleContextCapture() {
+        let enabled = !contextCaptureEnabled
+        UserDefaults.standard.set(enabled, forKey: "contextCaptureEnabled")
+        overlay.show("App context capture: \(enabled ? "on" : "off")")
+    }
+
+    @objc private func undoLastPaste() {
+        overlay.show(Pasteboard.undoLastPaste())
+    }
+
+    @objc private func retryLastPaste() {
+        overlay.show(Pasteboard.retryLastPaste())
+    }
 
     /// ggml Metal aborts in atexit (`ggml_metal_rsets_free`) if we tear down normally.
     /// Process is exiting anyway — skip C++ static destructors.
@@ -286,6 +433,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         liveBusy = false
         needsLeadingSpace = ContextCollector.cursorNeedsLeadingSpace()
         holdContext = ContextCollector.gather()
+        if !contextCaptureEnabled {
+            holdContext.beforeText = ""
+            holdContext.selectedText = ""
+            holdContext.chatLines = []
+        }
         listening = true
         overlay.wake()
         if !engine.startHold() {
@@ -313,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.listening else { continue }
                 let partial = self.engine.partialTranscript()
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !partial.isEmpty else { continue }
+                guard self.liveTypingEnabled, !partial.isEmpty else { continue }
                 DispatchQueue.main.sync {
                     guard self.listening, !self.liveBusy else { return }
                     self.liveBusy = true
@@ -347,6 +499,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if ctx.channelHint.isEmpty { ctx.channelHint = again.channelHint }
             if ctx.chatLines.isEmpty { ctx.chatLines = again.chatLines }
         }
+        if !contextCaptureEnabled {
+            ctx.beforeText = ""
+            ctx.selectedText = ""
+            ctx.chatLines = []
+        }
         let leading = needsLeadingSpace
         DispatchQueue.global().async { [weak self] in
             guard let self else { return }
@@ -369,6 +526,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if final.isEmpty { final = committed }
             let restore = self.restoreAppAfterPaste
+            if final.isEmpty, result.pressEnter {
+                Pasteboard.postEnter()
+                DispatchQueue.main.async {
+                    self.liveCommitted = ""
+                    self.restoreAppAfterPaste = nil
+                    self.needsLeadingSpace = false
+                    self.overlay.wake()
+                    self.overlay.show("Pressed Enter")
+                }
+                return
+            }
 
             let out = Pasteboard.commitFinal(
                 replacing: committed,
@@ -377,6 +545,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 restoreApp: restore
             ) { [weak self] in
                 self?.overlay.hideForPaste()
+            }
+            if out.result == .pasted, result.pressEnter {
+                Pasteboard.postEnter()
             }
             DispatchQueue.main.async {
                 self.liveCommitted = ""

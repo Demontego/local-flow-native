@@ -5,9 +5,11 @@ final class OverlayController {
     private var panel: NSPanel!
     private var label: NSTextField!
     private var bar: NSProgressIndicator!
+    private var permissionButton: NSButton!
+    private var permissionAction: (() -> Void)?
     private var snoozed = false
     private let width: CGFloat = 340
-    private let height: CGFloat = 78
+    private let height: CGFloat = 108
 
     init() {
         let screen = NSScreen.main?.visibleFrame ?? .zero
@@ -29,7 +31,7 @@ final class OverlayController {
         content.layer?.cornerRadius = 12
         content.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.58).cgColor
 
-        label = NSTextField(frame: NSRect(x: 12, y: 28, width: width - 52, height: 36))
+        label = NSTextField(frame: NSRect(x: 12, y: 48, width: width - 52, height: 44))
         label.isEditable = false
         label.isBordered = false
         label.drawsBackground = false
@@ -38,7 +40,7 @@ final class OverlayController {
         label.stringValue = "Local Flow"
         content.addSubview(label)
 
-        bar = NSProgressIndicator(frame: NSRect(x: 12, y: 12, width: width - 52, height: 8))
+        bar = NSProgressIndicator(frame: NSRect(x: 12, y: 28, width: width - 52, height: 8))
         bar.style = .bar
         bar.minValue = 0
         bar.maxValue = 100
@@ -46,6 +48,14 @@ final class OverlayController {
         bar.isIndeterminate = false
         bar.isHidden = true
         content.addSubview(bar)
+        permissionButton = NSButton(
+            frame: NSRect(x: 12, y: 12, width: width - 52, height: 28)
+        )
+        permissionButton.bezelStyle = .rounded
+        permissionButton.target = self
+        permissionButton.action = #selector(runPermissionAction)
+        permissionButton.isHidden = true
+        content.addSubview(permissionButton)
 
         content.addSubview(makeCloseButton())
 
@@ -95,10 +105,34 @@ final class OverlayController {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.snoozed else { return }
             self.bar.isHidden = true
+            self.permissionButton.isHidden = true
+            self.permissionAction = nil
             self.label.stringValue = text
             self.reposition()
             self.panel.orderFrontRegardless()
         }
+    }
+
+    func showPermission(
+        message: String,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.snoozed = false
+            self.bar.isHidden = true
+            self.label.stringValue = message
+            self.permissionButton.title = actionTitle
+            self.permissionAction = action
+            self.permissionButton.isHidden = false
+            self.reposition()
+            self.panel.orderFrontRegardless()
+        }
+    }
+
+    @objc private func runPermissionAction() {
+        permissionAction?()
     }
 
     /// Minimal determinate bar while downloading models.
@@ -108,6 +142,8 @@ final class OverlayController {
             self.snoozed = false
             let pct = max(0, min(100, percent))
             self.bar.isHidden = false
+            self.permissionButton.isHidden = true
+            self.permissionAction = nil
             self.bar.doubleValue = Double(pct)
             self.label.stringValue = "\(title) \(pct)%"
             self.reposition()

@@ -61,6 +61,21 @@ final class AudioCapture {
 }
 
 enum Pasteboard {
+    private struct LastPaste {
+        let text: String
+        let bundleID: String
+        let createdAt: Date
+    }
+
+    private struct RetryPaste {
+        let text: String
+        let bundleID: String
+    }
+
+    private static var lastPaste: LastPaste?
+    private static var retryPaste: RetryPaste?
+    private static let recoveryLifetime: TimeInterval = 30
+
     struct Outcome {
         var result: Kind
         var axTrusted: Bool
@@ -143,6 +158,7 @@ enum Pasteboard {
         with final: String,
         needsLeadingSpace: Bool,
         restoreApp: NSRunningApplication?,
+        recordUndo: Bool = true,
         prepareUI: (() -> Void)?
     ) -> Outcome {
         var text = final.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -160,6 +176,10 @@ enum Pasteboard {
                 let pb = NSPasteboard.general
                 pb.clearContents()
                 pb.setString(text, forType: .string)
+                retryPaste = RetryPaste(
+                    text: text,
+                    bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+                )
                 return Outcome(result: .copied, axTrusted: false, detail: "AX off")
             }
             if let app = restoreApp, !app.isTerminated, isReasonablePasteTarget(app) {
@@ -171,6 +191,10 @@ enum Pasteboard {
 
             if !committed.isEmpty {
                 if committed == text {
+                    if recordUndo,
+                       let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+                        lastPaste = LastPaste(text: text, bundleID: bundleID, createdAt: Date())
+                    }
                     log("commitFinal: live already matches final")
                     return Outcome(result: .pasted, axTrusted: true, detail: "unchanged")
                 }
@@ -183,9 +207,95 @@ enum Pasteboard {
             pb.setString(text, forType: .string)
             postCmdV()
             spin(0.1)
+            if recordUndo,
+               let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+                lastPaste = LastPaste(text: text, bundleID: bundleID, createdAt: Date())
+                retryPaste = nil
+            }
             log("commitFinal: Cmd+V ok")
             return Outcome(result: .pasted, axTrusted: true, detail: "Cmd+V")
         }
+    }
+
+    static func undoLastPaste() -> String {
+        onMain {
+            guard let last = lastPaste,
+                  Date().timeIntervalSince(last.createdAt) <= recoveryLifetime
+            else {
+                return "No recent Local Flow paste to undo"
+            }
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == last.bundleID else {
+                return "Undo skipped: focus changed"
+            }
+            guard AXIsProcessTrusted(), caretFollows(text: last.text) else {
+                return "Undo skipped: caret no longer follows Local Flow text"
+            }
+            backspace(times: last.text.count)
+            lastPaste = nil
+            log("undo: removed \(last.text.count) chars")
+            return "Undid last Local Flow paste"
+        }
+    }
+
+    static func retryLastPaste() -> String {
+        onMain {
+            guard let retry = retryPaste else { return "No failed paste to retry" }
+            guard AXIsProcessTrusted() else { return "Retry needs Accessibility" }
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == retry.bundleID else {
+                return "Retry skipped: focus changed"
+            }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(retry.text, forType: .string)
+            postCmdV()
+            spin(0.1)
+            lastPaste = LastPaste(text: retry.text, bundleID: retry.bundleID, createdAt: Date())
+            retryPaste = nil
+            log("retry: Cmd+V ok")
+            return "Retried Local Flow paste"
+        }
+    }
+
+    static func postEnter() {
+        onMain {
+            let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: true)
+            let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: false)
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+        }
+    }
+
+    static func caretFollows(text: String, value: String, location: Int) -> Bool {
+        guard location >= text.utf16.count else { return false }
+        let prefix = value.utf16.prefix(location)
+        return String(decoding: prefix.suffix(text.utf16.count), as: UTF16.self) == text
+    }
+
+    private static func caretFollows(text: String) -> Bool {
+        let system = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            system,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        ) == .success, let focusedRef
+        else { return false }
+        let focused = unsafeBitCast(focusedRef, to: AXUIElement.self)
+        var valueRef: CFTypeRef?
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused, kAXValueAttribute as CFString, &valueRef) == .success,
+              AXUIElementCopyAttributeValue(
+                  focused,
+                  kAXSelectedTextRangeAttribute as CFString,
+                  &rangeRef
+              ) == .success,
+              let value = valueRef as? String,
+              let rangeRef
+        else { return false }
+        let range = unsafeBitCast(rangeRef, to: AXValue.self)
+        var selected = CFRange()
+        guard AXValueGetValue(range, .cfRange, &selected), selected.length == 0 else { return false }
+        return caretFollows(text: text, value: value, location: selected.location)
     }
 
     private static func withLeadingSpace(_ text: String, needed: Bool) -> String {
