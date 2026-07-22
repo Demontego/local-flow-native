@@ -23,7 +23,7 @@ git push origin v0.1.0
 | Asset | Notes |
 |-------|--------|
 | macOS `.dmg` | Ad-hoc signed menubar app (`make dmg`) |
-| Windows `*-windows-x64.exe` | Tray app; hold Ctrl+Alt (`make windows`) |
+| Windows `*-windows-x64.exe` / `.zip` | Portable tray; hold Ctrl+Alt (`make windows` / `scripts/build_windows.ps1`) |
 | Android `*-android-debug.apk` | Debug build with arm64 JNI |
 
 Store-signed Play/App Store builds are not automated — see
@@ -41,7 +41,14 @@ make dmg            # → dist/Local Whisper Flow-0.1.0.dmg
 make windows        # → target/release/local-flow-windows.exe (build on Windows)
 ```
 
-**Windows:** run the exe → tray tooltip **Local Flow** → hold **Ctrl+Alt** to dictate → release pastes.
+**Windows (PowerShell):**
+
+```powershell
+.\scripts\bootstrap_windows.ps1   # once: Rust MSVC + CMake + VS Build Tools
+.\scripts\build_windows.ps1       # → dist/release/*-windows-x64.exe + .zip
+```
+
+Run the exe → tray tooltip **Local Flow** → hold **Ctrl+Alt** to dictate → release pastes.
 Tray menu: Load models / Download Whisper / Download Qwen / Quit.
 Data dir: `%LOCALAPPDATA%\Local Flow Native\`.
 

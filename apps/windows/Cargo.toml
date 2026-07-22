@@ -20,6 +20,9 @@ tracing = { workspace = true }
 tracing-subscriber = "0.3"
 parking_lot = { workspace = true }
 
+[build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.19"
 winit = "0.30"
@@ -28,6 +31,7 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",

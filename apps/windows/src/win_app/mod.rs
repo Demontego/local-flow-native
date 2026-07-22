@@ -2,11 +2,13 @@
 
 mod audio;
 mod hotkey;
+mod overlay;
 mod paste;
 
 use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::session::{Engine, SessionPhase};
+use overlay::Overlay;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +18,7 @@ use std::thread;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
-use winit::event::StartCause;
+use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
@@ -25,6 +27,8 @@ enum UserEvent {
     HotkeyPress,
     HotkeyRelease,
     Status(String),
+    /// Hide HUD so it cannot steal focus during paste.
+    HideOverlay,
 }
 
 enum WorkerCmd {
@@ -71,6 +75,7 @@ pub fn run(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         listening,
         tray: None,
         window: None,
+        overlay: None,
         item_load: None,
         item_whisper: None,
         item_qwen: None,
@@ -169,6 +174,7 @@ fn worker_loop(
                         if result.clean.is_empty() {
                             let _ = proxy.send_event(UserEvent::Status(result.raw));
                         } else {
+                            let _ = proxy.send_event(UserEvent::HideOverlay);
                             match paste::paste_text(&result.clean, result.press_enter) {
                                 Ok(()) => {
                                     let preview: String =
@@ -227,6 +233,7 @@ struct App {
     tray: Option<TrayIcon>,
     /// Hidden window keeps the Win32 message pump alive for the tray.
     window: Option<Window>,
+    overlay: Option<Overlay>,
     item_load: Option<MenuItem>,
     item_whisper: Option<MenuItem>,
     item_qwen: Option<MenuItem>,
@@ -260,8 +267,19 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(tray) = &self.tray {
                     let _ = tray.set_tooltip(Some(&msg));
                 }
+                if let Some(hud) = &mut self.overlay {
+                    hud.show(&msg);
+                }
+            }
+            UserEvent::HideOverlay => {
+                if let Some(hud) = &mut self.overlay {
+                    hud.hide();
+                }
             }
             UserEvent::HotkeyPress => {
+                if let Some(hud) = &mut self.overlay {
+                    hud.show("Listening…");
+                }
                 let _ = self.worker_tx.send(WorkerCmd::HoldStart);
             }
             UserEvent::HotkeyRelease => {
@@ -285,9 +303,16 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        _event: winit::event::WindowEvent,
+        window_id: WindowId,
+        event: WindowEvent,
     ) {
+        if matches!(event, WindowEvent::RedrawRequested) {
+            if let Some(hud) = &self.overlay {
+                if hud.window_id() == window_id {
+                    hud.paint();
+                }
+            }
+        }
     }
 }
 
@@ -300,6 +325,7 @@ impl App {
             .with_visible(false)
             .with_title("Local Flow");
         self.window = Some(event_loop.create_window(attrs)?);
+        self.overlay = Some(Overlay::create(event_loop)?);
 
         let item_load = MenuItem::new("Load models", true, None);
         let item_whisper = MenuItem::new("Download Whisper", true, None);

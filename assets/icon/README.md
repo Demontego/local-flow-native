@@ -10,3 +10,4 @@ Outputs:
 - `apps/macos/Resources/AppIcon.icns` — Finder / .app
 - `apps/macos/Resources/StatusIcon*.png` — menubar
 - `apps/windows/assets/tray-icon.png` — system tray
+- `apps/windows/assets/app-icon.png` / `app-icon.ico` — Windows exe (`.ico` embedded via winresource)

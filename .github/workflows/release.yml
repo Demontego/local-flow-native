@@ -42,13 +42,32 @@ jobs:
         shell: bash
         run: make windows
       - name: Stage artifacts
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p dist/release
-          EXE="$(find target -name 'local-flow-windows.exe' -path '*/release/*' | head -1)"
-          test -n "$EXE"
-          cp "$EXE" "dist/release/local-flow-${{ github.ref_name }}-windows-x64.exe"
-          (cd dist/release && sha256sum *.exe > SHA256SUMS-windows.txt)
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
+          $exe = Get-ChildItem -Path target -Recurse -Filter local-flow-windows.exe |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]' } |
+            Select-Object -First 1
+          if (-not $exe) { throw "local-flow-windows.exe not found under target/*/release" }
+          $ver = "${{ github.ref_name }}"
+          if ($ver -notlike "v*") { $ver = "0.1.0" }
+          $ver = $ver.TrimStart("v")
+          $outName = "local-flow-$ver-windows-x64.exe"
+          $zipName = "local-flow-$ver-windows-x64.zip"
+          $out = Join-Path "dist/release" $outName
+          $zip = Join-Path "dist/release" $zipName
+          Copy-Item -Force $exe.FullName $out
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path $out -DestinationPath $zip
+          $sum = Join-Path "dist/release" "SHA256SUMS-windows.txt"
+          $lines = @()
+          foreach ($f in @($out, $zip)) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLowerInvariant()
+            $lines += "$hash  $(Split-Path $f -Leaf)"
+          }
+          $lines | Set-Content -Encoding ascii -Path $sum
+          Get-Content $sum
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
@@ -113,7 +132,7 @@ jobs:
           body: |
             ### Install notes
             - **macOS:** open the DMG, drag to Applications; grant Mic / Accessibility / Input Monitoring.
-            - **Windows:** run the `.exe` (tray icon **LF**); hold **Ctrl+Alt** to dictate. Grant microphone access when prompted.
+            - **Windows:** run the `.exe` or unpack the portable `.zip` (tray icon **LF**); hold **Ctrl+Alt** to dictate. Grant microphone access when prompted.
             - **Android:** debug APK — enable the Local Flow keyboard in system settings after install.
             - Model weights are downloaded in-app (not bundled).
           files: release-assets/**
