@@ -313,9 +313,11 @@ mod llama_backend {
     impl LlamaCleanup {
         pub fn load(model_path: &Path, system_prompt: &str) -> Result<Self> {
             let backend = shared_backend()?;
-            let model =
-                LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
-                    .map_err(|e| Error::Cleanup(format!("load gguf: {e}")))?;
+            // ponytail: CPU only — whisper already owns Metal; dual ggml-metal
+            // residency sets abort in sampler / atexit. Upgrade: serialize one Metal device.
+            let params = LlamaModelParams::default().with_n_gpu_layers(0);
+            let model = LlamaModel::load_from_file(backend, model_path, &params)
+                .map_err(|e| Error::Cleanup(format!("load gguf: {e}")))?;
             Ok(Self {
                 model,
                 system: system_prompt.to_string(),
@@ -354,10 +356,13 @@ mod llama_backend {
                 .apply_chat_template(&tmpl, &msgs, true)
                 .map_err(|e| Error::Cleanup(e.to_string()))?;
 
-            const N_CTX: u32 = 4096;
+            const N_CTX: u32 = 2048;
             const N_GEN: usize = 128;
-            let ctx_params =
-                LlamaContextParams::default().with_n_ctx(Some(NonZeroU32::new(N_CTX).unwrap()));
+            // Default n_batch is smaller than a fat prompt → decode/sample ggml_abort.
+            let ctx_params = LlamaContextParams::default()
+                .with_n_ctx(Some(NonZeroU32::new(N_CTX).unwrap()))
+                .with_n_batch(N_CTX)
+                .with_n_ubatch(N_CTX);
             let mut lctx = self
                 .model
                 .new_context(shared_backend()?, ctx_params)
@@ -398,7 +403,11 @@ mod llama_backend {
                 LlamaSampler::chain_simple([LlamaSampler::temp(0.0), LlamaSampler::greedy()]);
             let mut out = String::new();
             let mut n_cur = n as i32;
+            let n_ctx = N_CTX as i32;
             for _ in 0..N_GEN {
+                if n_cur >= n_ctx {
+                    break;
+                }
                 let token = sampler.sample(&lctx, -1);
                 sampler.accept(token);
                 if self.model.is_eog_token(token) {

@@ -47,6 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Catch AppKit terminate→exit paths that bypass quitApp/_exit.
+        lf_install_clean_die()
         overlay = OverlayController()
         trackFrontmostApps()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -111,13 +113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Cmd+Q / Apple events bypass our menu action. ggml Metal can abort in
-        // its C++ static destructors, so use the same intentional fast exit.
-        Darwin._exit(0)
+        // Cmd+Q / Apple events bypass menu Quit. Never return into AppKit
+        // terminate→exit→ggml Metal atexit abort.
+        lf_die_clean() // noreturn (_exit)
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Darwin._exit(0)
+        lf_die_clean()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -388,7 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ggml Metal aborts in atexit (`ggml_metal_rsets_free`) if we tear down normally.
     /// Process is exiting anyway — skip C++ static destructors.
     @objc private func quitApp() {
-        Darwin._exit(0)
+        lf_die_clean()
     }
 
     /// Stale Accessibility toggles after rebuild: reset TCC for our bundle, then user re-adds app.
@@ -570,17 +573,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Menubar / tray glyph from Contents/Resources (falls back to "LF" title).
+    /// Menubar glyph — SF Symbol template so macOS tints like other status items.
     private static func statusBarImage() -> NSImage? {
-        let bundle = Bundle.main
-        let img = bundle.image(forResource: "StatusIcon")
-            ?? NSImage(contentsOf: bundle.bundleURL
-                .appendingPathComponent("Contents/Resources/StatusIcon.png"))
-        guard let img else { return nil }
-        // Square menubar slot (~18pt); keep color brand mark (not template).
-        let side: CGFloat = 18
-        img.size = NSSize(width: side, height: side)
-        img.isTemplate = false
+        let base = NSImage(systemSymbolName: "waveform.and.mic", accessibilityDescription: "Local Flow")
+            ?? NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Local Flow")
+        guard let base else { return nil }
+        let img = base.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        ) ?? base
+        img.isTemplate = true
         return img
     }
 }
