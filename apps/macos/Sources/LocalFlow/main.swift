@@ -22,17 +22,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: NSMenu!
     private let engine = EngineBridge()
     private var overlay: OverlayController!
+    private var hub: HubWindowController!
     private var hotkey: HotkeyMonitor!
     private var audio: AudioCapture?
     private var listening = false
     private var modelsReady = false
+    /// Dictate into Hub scratch (no paste).
+    private var scratchMode = false
     /// Last real app in front (not Control Center / ourselves) — paste target.
     private var lastUserApp: NSRunningApplication?
     /// Set when hold started via LF menubar (focus stolen); nil for Ctrl+Option.
     private var restoreAppAfterPaste: NSRunningApplication?
     private var appActivateObserver: NSObjectProtocol?
     private var permissionPollTimer: Timer?
-    /// Text we actually typed into the field (append-only during hold).
+    private var learnPollTimer: Timer?
+    /// After paste: watch field edits for auto-dictionary.
+    private var lastPasteLearn: (clean: String, raw: String, armedAt: Date, deadline: Date)?
+    /// Debounce: only learn after field stops changing.
+    private var learnCandidate: String?
+    private var learnCandidateSince: Date?
+    private var lastLearnedHeard: String?
+    /// Progressive Whisper text while holding (overlay). Pasted only after Qwen on release.
+    private var transcriptCache = ""
+    /// Text typed into the field when live typing is on (append-only during hold).
     private var liveCommitted = ""
     private var liveBusy = false
     /// Captured at hold start (before live typing) so cleanup sees real window/field context.
@@ -40,7 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Char before caret was a word → insert leading space on first paste.
     private var needsLeadingSpace = false
     private var liveTypingEnabled: Bool {
-        UserDefaults.standard.object(forKey: "liveTypingEnabled") as? Bool ?? true
+        // Off by default: hold = Whisper→cache/overlay; release → Qwen → paste → clear.
+        // Opt-in: also type into the field while holding.
+        UserDefaults.standard.object(forKey: "liveTypingEnabled") as? Bool ?? false
     }
     private var contextCaptureEnabled: Bool {
         UserDefaults.standard.object(forKey: "contextCaptureEnabled") as? Bool ?? true
@@ -50,6 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Catch AppKit terminate→exit paths that bypass quitApp/_exit.
         lf_install_clean_die()
         overlay = OverlayController()
+        hub = HubWindowController(
+            engine: engine,
+            onDictateScratch: { [weak self] in self?.enableScratchMode() },
+            onLearnSelection: { [weak self] in self?.learnFromSelection() }
+        )
         trackFrontmostApps()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let btn = statusItem.button {
@@ -59,16 +78,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 btn.title = "LF"
             }
-            btn.toolTip = "Hold left mouse = dictate · Right-click = menu · Or hold Ctrl+Option"
+            btn.toolTip = "Tap fn to dictate · Hold LF / Ctrl+Option · Right-click = menu"
             btn.sendAction(on: [.leftMouseDown, .leftMouseUp, .rightMouseDown])
             btn.target = self
             btn.action = #selector(statusButtonEvent)
         }
 
         menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Open Hub", action: #selector(openHub), keyEquivalent: "h"))
+        menu.addItem(NSMenuItem(title: "Dictate to Scratch", action: #selector(toggleScratch), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Learn from selection", action: #selector(learnFromSelection), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Load models", action: #selector(loadModels), keyEquivalent: "l"))
-        menu.addItem(NSMenuItem(title: "Download Whisper", action: #selector(downloadWhisper), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Download Qwen3 (1.7B ~1GB)", action: #selector(downloadQwen), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Download Whisper base-ru (~141MB)", action: #selector(downloadWhisper), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Download Gemma 4 E2B (~3.2GB)", action: #selector(downloadQwen), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Add dictionary replacement…", action: #selector(addDictionaryRule), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Add voice snippet…", action: #selector(addSnippet), keyEquivalent: ""))
@@ -93,8 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
         // Do NOT assign statusItem.menu — left-click is push-to-talk.
 
-        hotkey = HotkeyMonitor(onPress: { [weak self] in self?.holdStart(stoleFocus: false) },
-                               onRelease: { [weak self] in self?.holdEnd() })
+        hotkey = HotkeyMonitor(
+            onHoldPress: { [weak self] in self?.holdStart(stoleFocus: false) },
+            onHoldRelease: { [weak self] in self?.holdEnd() },
+            onTapToggle: { [weak self] in self?.toggleListen() }
+        )
 
         overlay.show("Starting…")
         bootstrapPermissionsThenArm()
@@ -103,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s = self?.engine.loadModels() ?? "fail"
             DispatchQueue.main.async {
                 self?.modelsReady = s.contains("asr=whisper")
-                if Permissions.onboardingStep() == .ready {
+                if Permissions.onboardingStep(modelsReady: self?.modelsReady ?? false) == .ready {
                     self?.overlay.show(self?.readyMessage(models: s) ?? s)
                 } else {
                     self?.refreshPermissionOnboarding()
@@ -183,21 +209,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bootstrapPermissionsThenArm() {
-        // Hotkey uses flagsState poll — no Input Monitoring permission required.
+        _ = Permissions.requestListenEvents()
         _ = hotkey.start()
         refreshPermissionOnboarding(requestMicrophoneIfNeeded: true)
     }
 
     private func refreshPermissionOnboarding(requestMicrophoneIfNeeded: Bool = false) {
-        let step = Permissions.onboardingStep()
+        let step = Permissions.onboardingStep(modelsReady: modelsReady)
         if step == .ready {
             permissionPollTimer?.invalidate()
             permissionPollTimer = nil
-            overlay.show(
-                modelsReady
-                    ? "Ready — Ctrl+Option or LF"
-                    : "Permissions ready — loading models…"
-            )
+            let fn = hotkey.fnTapArmed ? "tap fn" : "enable Input Monitoring"
+            overlay.show(modelsReady ? "Ready — \(fn)" : "Permissions ready — loading models…")
             return
         }
         if step == .requestMicrophone, requestMicrophoneIfNeeded {
@@ -230,8 +253,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !models.contains("asr=whisper") {
             return "Whisper not loaded — Download Whisper + Load models\n\(models)"
         }
-        let ax = Permissions.isAccessibilityTrusted() ? "AX✓" : "AX✗ fix via menu"
-        return "Ready — Ctrl+Option · \(ax)\n\(models)"
+        let fn = hotkey.fnTapArmed ? "tap fn" : "Input Monitoring off"
+        let ax = Permissions.isAccessibilityTrusted() ? "AX✓" : "AX✗"
+        return "Ready — \(fn) · \(ax)\n\(models)"
+    }
+
+    @objc private func openHub() {
+        hub.show()
+    }
+
+    @objc private func toggleScratch() {
+        scratchMode.toggle()
+        engine.setDestinationScratch(scratchMode)
+        overlay.show(scratchMode ? "Scratch mode — tap fn" : "Paste mode — tap fn")
+    }
+
+    private func enableScratchMode() {
+        scratchMode = true
+        engine.setDestinationScratch(true)
+        overlay.show("Scratch mode — tap fn")
+    }
+
+    @objc private func learnFromSelection() {
+        guard let past = lastPasteLearn?.clean, !past.isEmpty else {
+            overlay.show("Dictate something first, then edit + Learn")
+            return
+        }
+        let edited = ContextCollector.selectedText().trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = ContextCollector.focusedFieldValue()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let use = !edited.isEmpty ? edited : fallback
+        guard !use.isEmpty, use != past else {
+            overlay.show("Select or edit the pasted text first")
+            return
+        }
+        applyLearn(pasted: past, edited: use)
+    }
+
+    private func applyLearn(pasted: String, edited: String) {
+        let json = engine.learnFromEdit(pasted: pasted, edited: edited)
+        guard let data = json.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let first = arr.first,
+              let heard = first["heard"] as? String,
+              let with = first["replace_with"] as? String
+        else {
+            overlay.show(json.hasPrefix("error") ? json : "No learnable edit")
+            return
+        }
+        lastLearnedHeard = heard
+        overlay.showLearn(message: "Learned: \(heard) → \(with)", onKeep: { [weak self] in
+            self?.overlay.show("Kept dictionary rule")
+        }, onUndo: { [weak self] in
+            guard let self, let h = self.lastLearnedHeard else { return }
+            _ = self.engine.undoLearned(heard: h)
+            self.overlay.show("Undid: \(h)")
+        })
+    }
+
+    private func toggleListen() {
+        if listening {
+            holdEnd()
+        } else {
+            holdStart(stoleFocus: false)
+        }
+    }
+
+    private func armLearnWatch(clean: String, raw: String) {
+        let now = Date()
+        lastPasteLearn = (
+            clean,
+            raw,
+            now.addingTimeInterval(2.0), // grace: ignore edits while user starts typing
+            now.addingTimeInterval(60)
+        )
+        learnCandidate = nil
+        learnCandidateSince = nil
+        learnPollTimer?.invalidate()
+        learnPollTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) {
+            [weak self] _ in self?.tickLearnWatch()
+        }
+    }
+
+    private func tickLearnWatch() {
+        guard let last = lastPasteLearn else {
+            learnPollTimer?.invalidate()
+            learnPollTimer = nil
+            return
+        }
+        let now = Date()
+        if now > last.deadline {
+            lastPasteLearn = nil
+            learnCandidate = nil
+            learnCandidateSince = nil
+            learnPollTimer?.invalidate()
+            learnPollTimer = nil
+            return
+        }
+        // Wait out paste settle + first keystrokes.
+        guard now >= last.armedAt else { return }
+
+        guard let value = ContextCollector.focusedFieldValue()?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !value.isEmpty,
+            value != last.clean,
+            value.contains(last.clean.prefix(min(12, last.clean.count)))
+                || last.clean.contains(value.prefix(min(12, value.count)))
+                || abs(value.count - last.clean.count) < max(24, last.clean.count / 2)
+        else {
+            // Field back to original / unrelated — reset debounce.
+            learnCandidate = nil
+            learnCandidateSince = nil
+            return
+        }
+
+        if learnCandidate != value {
+            learnCandidate = value
+            learnCandidateSince = now
+            return
+        }
+        // Need ~2.8s of identical field value (user paused editing).
+        guard let since = learnCandidateSince, now.timeIntervalSince(since) >= 2.8 else {
+            return
+        }
+
+        let edited = value
+        lastPasteLearn = nil
+        learnCandidate = nil
+        learnCandidateSince = nil
+        learnPollTimer?.invalidate()
+        learnPollTimer = nil
+        applyLearn(pasted: last.clean, edited: edited)
     }
 
     @objc private func retryPermissions() {
@@ -245,7 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s = self?.engine.loadModels() ?? "fail"
             DispatchQueue.main.async {
                 self?.modelsReady = s.contains("asr=whisper")
-                if Permissions.onboardingStep() == .ready {
+                if Permissions.onboardingStep(modelsReady: self?.modelsReady ?? false) == .ready {
                     self?.overlay.show("Loaded: \(s)")
                 } else {
                     self?.refreshPermissionOnboarding()
@@ -261,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func downloadQwen() {
-        runDownload(title: "Qwen3") { engine, ctx in
+        runDownload(title: "Gemma 4 E2B") { engine, ctx in
             engine.downloadQwen(progress: ctx)
         }
     }
@@ -437,6 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Ctrl+Option: keep focus in the target field — do not activate() later.
         // LF icon: remember app to restore after menubar click stole focus.
         restoreAppAfterPaste = stoleFocus ? (Self.usableFrontmost() ?? lastUserApp) : nil
+        transcriptCache = ""
         liveCommitted = ""
         liveBusy = false
         needsLeadingSpace = ContextCollector.cursorNeedsLeadingSpace()
@@ -447,9 +600,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             holdContext.chatLines = []
         }
         listening = true
+        engine.setDestinationScratch(scratchMode)
         overlay.wake()
+        overlay.setListening(true)
         if !engine.startHold() {
             listening = false
+            overlay.setListening(false)
             overlay.show("Busy — try again")
             return
         }
@@ -459,23 +615,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audio = capture
         if !capture.start() {
             listening = false
+            overlay.setListening(false)
             engine.cancelHold()
             audio = nil
             overlay.show("Mic failed — check Microphone permission")
             return
         }
-        overlay.show("Listening…")
+        overlay.show(scratchMode ? "Listening → Scratch…" : "Listening…")
         NSLog("LocalFlow: Listening started")
-        // Live: append-only into field. Final: cleanup edit replaces committed span.
+        // Hold: Whisper → cache + overlay (no paste). Release: final ASR → Qwen → paste.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while self?.listening == true {
-                Thread.sleep(forTimeInterval: 0.65)
+                Thread.sleep(forTimeInterval: 1.6)
                 guard let self, self.listening else { continue }
                 let partial = self.engine.partialTranscript()
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard self.liveTypingEnabled, !partial.isEmpty else { continue }
+                guard !partial.isEmpty else { continue }
                 DispatchQueue.main.sync {
-                    guard self.listening, !self.liveBusy else { return }
+                    guard self.listening else { return }
+                    self.transcriptCache = partial
+                    self.overlay.show(partial)
+                    guard self.liveTypingEnabled, !self.liveBusy else { return }
                     self.liveBusy = true
                     let result = Pasteboard.liveAppend(
                         committed: self.liveCommitted,
@@ -484,7 +644,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         restoreApp: self.restoreAppAfterPaste
                     )
                     self.liveCommitted = result.committed
-                    self.overlay.show(result.hypothesis.isEmpty ? "Listening…" : result.hypothesis)
                     self.liveBusy = false
                 }
             }
@@ -496,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         listening = false
         audio?.stop()
         audio = nil
+        overlay.setListening(false)
         overlay.show("Editing…")
         NSLog("LocalFlow: final + cleanup")
         // Prefer hold-start context (window/app/draft before we typed into the field).
@@ -518,13 +678,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for _ in 0..<40 where self.liveBusy {
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            let committed: String = DispatchQueue.main.sync { self.liveCommitted }
+            let committed: String = DispatchQueue.main.sync {
+                self.liveTypingEnabled ? self.liveCommitted : ""
+            }
             let result = self.engine.endHold(ctx: ctx)
             let raw = result.raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let clean = result.clean.trimmingCharacters(in: .whitespacesAndNewlines)
+            let toScratch = result.destination == "scratch_pad"
             var final = clean.isEmpty ? raw : clean
             if final.hasPrefix("error:") || final.hasPrefix("empty:") {
                 DispatchQueue.main.async {
+                    self.transcriptCache = ""
                     self.liveCommitted = ""
                     self.restoreAppAfterPaste = nil
                     self.needsLeadingSpace = false
@@ -532,11 +696,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
-            if final.isEmpty { final = committed }
+            if final.isEmpty {
+                final = DispatchQueue.main.sync { self.transcriptCache }
+            }
             let restore = self.restoreAppAfterPaste
+
+            if toScratch {
+                DispatchQueue.main.async {
+                    self.transcriptCache = ""
+                    self.liveCommitted = ""
+                    self.restoreAppAfterPaste = nil
+                    self.needsLeadingSpace = false
+                    self.overlay.wake()
+                    self.overlay.show(final.isEmpty ? "No speech" : "Saved to Scratch")
+                    self.hub.refresh()
+                }
+                return
+            }
+
             if final.isEmpty, result.pressEnter {
                 Pasteboard.postEnter()
                 DispatchQueue.main.async {
+                    self.transcriptCache = ""
                     self.liveCommitted = ""
                     self.restoreAppAfterPaste = nil
                     self.needsLeadingSpace = false
@@ -558,16 +739,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Pasteboard.postEnter()
             }
             DispatchQueue.main.async {
+                self.transcriptCache = ""
                 self.liveCommitted = ""
                 self.restoreAppAfterPaste = nil
                 self.needsLeadingSpace = false
                 self.overlay.wake()
                 if final.isEmpty {
-                    self.overlay.show("No speech — hold longer")
+                    self.overlay.show("No speech — tap fn again")
                 } else if out.result == .copied && !out.axTrusted {
                     self.overlay.show("Copied — Cmd+V\nFix Accessibility")
                 } else {
                     self.overlay.show(final)
+                    if out.result == .pasted {
+                        self.armLearnWatch(clean: final, raw: raw)
+                    }
                 }
             }
         }

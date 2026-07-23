@@ -5,8 +5,8 @@ Audio, models, history, and personalization stay on the device.
 
 | Shell | Path | Status |
 |-------|------|--------|
-| macOS menubar | `apps/macos` | Hotkey, overlay, Accessibility paste |
-| Windows tray | `apps/windows` | Ctrl+Alt hold, tray menu, clipboard paste |
+| macOS menubar | `apps/macos` | Tap **fn** toggle, Hub, scratch, AX paste |
+| Windows tray | `apps/windows` | Tap **Right Ctrl**, Hub, scratch, clipboard paste |
 | Flutter + IME | `apps/local_flow_app` | Android IME + iOS keyboard |
 
 License: [MIT](LICENSE). Third-party notices: [THIRD_PARTY.md](THIRD_PARTY.md).
@@ -23,7 +23,7 @@ git push origin v0.1.0
 | Asset | Notes |
 |-------|--------|
 | macOS `.dmg` | Ad-hoc signed menubar app (`make dmg`) |
-| Windows `*-windows-x64.exe` / `.zip` | Portable tray; hold Ctrl+Alt (`make windows` / `scripts/build_windows.ps1`) |
+| Windows `*-windows-x64.exe` / `.zip` | Portable tray; tap Right Ctrl (`make windows` / `scripts/build_windows.ps1`) |
 | Android `*-android-debug.apk` | Debug build with arm64 JNI |
 
 Store-signed Play/App Store builds are not automated — see
@@ -48,9 +48,10 @@ make windows        # → target/release/local-flow-windows.exe (build on Window
 .\scripts\build_windows.ps1       # → dist/release/*-windows-x64.exe + .zip
 ```
 
-Run the exe → tray tooltip **Local Flow** → hold **Ctrl+Alt** to dictate → release pastes.
-Tray menu: Load models / Download Whisper / Download Qwen / Quit.
-Data dir: `%LOCALAPPDATA%\Local Flow Native\`.
+Run the exe → tray **Local Flow** → **tap Right Ctrl** to start/stop dictate → pastes on stop.
+Hold **Ctrl+Alt** still works. Tray: Open Hub / Dictate to Scratch / Learn from clipboard /
+Load models / Download Whisper / Download Gemma 4 / Quit.
+Data dir: `%LOCALAPPDATA%\Local Flow Native\` (`hub/` for stats, sessions, notes).
 
 Mobile (needs Flutter; Android also needs `ANDROID_NDK_HOME`):
 
@@ -81,18 +82,21 @@ Android NDK linker names live in `.cargo/config.toml` (API 24). Override
 
 Open the DMG → drag **Local Whisper Flow** into **Applications**.
 
-First launch: grant **Microphone**, **Accessibility**, and **Input Monitoring**.
+First launch: grant **Microphone**, **Accessibility**, and **Input Monitoring** (for fn).
 If the hotkey does nothing: menubar **LF → Retry hotkey / permissions**.
 
-Hold **Ctrl+Option** → speak → release → cleaned text is pasted.
+**Tap fn** (Globe) to start/stop listening → cleaned text pastes on stop.
+Hold **Ctrl+Option** or hold the menubar icon still works. Open **Hub** for stats,
+history, scratch notes, and dictionary. **Dictate to Scratch** saves a note (no paste).
+After paste, if you edit the text, Local Flow can auto-learn a dictionary rule (Undo in bubble).
 
 ## Architecture
 
 ```
-crates/local-flow-core   session FSM, ASR, cleanup, history
+crates/local-flow-core   session FSM, ASR, cleanup, hub, learn, history
 crates/local-flow-ffi    C ABI (+ JNI for Android; UniFFI stubs optional)
-apps/macos               Swift menubar / permissions / audio / AX paste
-apps/windows             Rust tray / Ctrl+Alt / mic / clipboard paste
+apps/macos               Swift menubar / fn tap / Hub / AX paste
+apps/windows             Rust tray / Right Ctrl / Hub / clipboard paste
 apps/local_flow_app      Flutter host + Android IME + iOS keyboard
 vendor/whisper-rs-sys    patched whisper.cpp bindgen for mobile NDK
 ```
@@ -111,22 +115,23 @@ Weights are not in the DMG/APK (multi-GB). Download from the app after install.
 | Flutter Android | app `filesDir` |
 | Windows tray | `%LOCALAPPDATA%\Local Flow Native\` |
 
-- **Whisper:** `ggml-small.bin`
-- **Qwen3:** `Qwen3-1.7B-Q4_K_M.gguf` (~1.1 GB cleanup)
-- Then **Load models**. Without Qwen, cleanup falls back to a small heuristic.
+- **Whisper:** `ggml-base-ru.bin` (~141 MB, Russian fine-tune)
+- **Gemma 4 E2B:** `gemma-4-E2B-it-Q4_K_M.gguf` (~3.2 GB cleanup)
+- Then **Load models**. Without the LLM, cleanup falls back to a small heuristic.
 - Context comes from Accessibility / IME — no screenshot path.
 
-## Personalization (macOS menubar)
+## Personalization + Hub
 
-Local-only controls in the LF menu:
+Local-only (no account, no sync):
 
-- Dictionary replacements and voice snippets
-- Per-app writing style
-- Polish selected text, live typing, context capture, cleanup toggles
+- **Hub** (menubar / tray): words today/week, streak, session history, scratch notes, dictionary
+- Dictionary replacements (manual or learned from post-paste edits) and voice snippets
+- Per-app writing style, polish selection, live typing, context capture, cleanup toggles
 - Spoken punctuation (e.g. **запятая**, **точка**, **новая строка**)
 - Undo / retry last paste (short window, focus must still match)
 
-Stored under the app data directory as `personalization.json` — no account, no sync.
+Files under the app data directory: `personalization.json`, `hub/stats.json`,
+`hub/sessions.jsonl`, `hub/notes.json`.
 
 ## Quality checks
 

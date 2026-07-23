@@ -1,13 +1,15 @@
-//! Tray + Ctrl+Alt hold-to-talk + mic + clipboard paste.
+//! Tray + Right-Ctrl tap / Ctrl+Alt hold + mic + clipboard paste + Hub.
 
 mod audio;
 mod hotkey;
+mod hub;
 mod overlay;
 mod paste;
 
 use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::session::{Engine, SessionPhase};
+use local_flow_core::DictationDestination;
 use overlay::Overlay;
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -26,6 +28,7 @@ enum UserEvent {
     Menu(tray_icon::menu::MenuId),
     HotkeyPress,
     HotkeyRelease,
+    HotkeyToggle,
     Status(String),
     /// Hide HUD so it cannot steal focus during paste.
     HideOverlay,
@@ -37,6 +40,9 @@ enum WorkerCmd {
     LoadModels,
     DownloadWhisper,
     DownloadQwen,
+    SetScratch(bool),
+    OpenHub,
+    LearnClipboard,
     Shutdown,
 }
 
@@ -47,22 +53,30 @@ pub fn run(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
-    // Forward muda menu clicks into winit.
     let menu_proxy = proxy.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
     }));
 
     let listening = Arc::new(AtomicBool::new(false));
+    let last_clean = Arc::new(Mutex::new(String::new()));
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerCmd>();
     let status_proxy = proxy.clone();
     let eng_worker = Arc::clone(&engine);
     let listening_worker = Arc::clone(&listening);
+    let last_clean_worker = Arc::clone(&last_clean);
     thread::Builder::new()
         .name("lf-worker".into())
-        .spawn(move || worker_loop(eng_worker, worker_rx, listening_worker, status_proxy))?;
+        .spawn(move || {
+            worker_loop(
+                eng_worker,
+                worker_rx,
+                listening_worker,
+                last_clean_worker,
+                status_proxy,
+            )
+        })?;
 
-    // Boot: load whatever models are already on disk.
     let _ = worker_tx.send(WorkerCmd::LoadModels);
 
     let hotkey_proxy = proxy.clone();
@@ -73,12 +87,17 @@ pub fn run(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         worker_tx,
         engine,
         listening,
+        last_clean,
+        scratch: false,
         tray: None,
         window: None,
         overlay: None,
         item_load: None,
         item_whisper: None,
         item_qwen: None,
+        item_hub: None,
+        item_scratch: None,
+        item_learn: None,
         item_quit: None,
     };
     event_loop.run_app(&mut app)?;
@@ -89,12 +108,33 @@ fn worker_loop(
     engine: Arc<Engine>,
     rx: Receiver<WorkerCmd>,
     listening: Arc<AtomicBool>,
+    last_clean: Arc<Mutex<String>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
     let capture = Mutex::new(None::<audio::Capture>);
     while let Ok(cmd) = rx.recv() {
         match cmd {
             WorkerCmd::Shutdown => break,
+            WorkerCmd::OpenHub => {
+                hub::show_hub(&engine);
+            }
+            WorkerCmd::LearnClipboard => {
+                let past = last_clean.lock().clone();
+                let msg = hub::learn_from_clipboard(&engine, &past);
+                let _ = proxy.send_event(UserEvent::Status(msg));
+            }
+            WorkerCmd::SetScratch(on) => {
+                engine.set_destination(if on {
+                    DictationDestination::ScratchPad
+                } else {
+                    DictationDestination::Field
+                });
+                let _ = proxy.send_event(UserEvent::Status(if on {
+                    "Scratch mode — tap Right Ctrl".into()
+                } else {
+                    "Paste mode — tap Right Ctrl".into()
+                }));
+            }
             WorkerCmd::LoadModels => {
                 let _ = proxy.send_event(UserEvent::Status("Loading models…".into()));
                 match engine.load_models() {
@@ -123,10 +163,10 @@ fn worker_loop(
                 }
             }
             WorkerCmd::DownloadQwen => {
-                let _ = proxy.send_event(UserEvent::Status("Downloading Qwen…".into()));
+                let _ = proxy.send_event(UserEvent::Status("Downloading Gemma 4…".into()));
                 match engine.download_qwen(|p| {
                     if p % 5 == 0 {
-                        let _ = proxy.send_event(UserEvent::Status(format!("Qwen {p}%")));
+                        let _ = proxy.send_event(UserEvent::Status(format!("Gemma4 {p}%")));
                     }
                 }) {
                     Ok(s) => {
@@ -134,7 +174,7 @@ fn worker_loop(
                         let _ = engine.load_models();
                     }
                     Err(e) => {
-                        let _ = proxy.send_event(UserEvent::Status(format!("Qwen dl: {e}")));
+                        let _ = proxy.send_event(UserEvent::Status(format!("Gemma4 dl: {e}")));
                     }
                 }
             }
@@ -167,13 +207,23 @@ fn worker_loop(
                     continue;
                 }
                 drop(capture.lock().take());
-                let _ = proxy.send_event(UserEvent::Status("Transcribing…".into()));
+                let _ = proxy.send_event(UserEvent::Status("Editing…".into()));
                 let ctx = foreground_context();
                 match engine.end_hold(ctx) {
                     Ok(result) => {
+                        if result.destination == DictationDestination::ScratchPad {
+                            let preview: String = result.clean.chars().take(48).collect();
+                            let _ = proxy.send_event(UserEvent::Status(if preview.is_empty() {
+                                "No speech".into()
+                            } else {
+                                format!("Saved to Scratch · {preview}")
+                            }));
+                            continue;
+                        }
                         if result.clean.is_empty() {
                             let _ = proxy.send_event(UserEvent::Status(result.raw));
                         } else {
+                            *last_clean.lock() = result.clean.clone();
                             let _ = proxy.send_event(UserEvent::HideOverlay);
                             match paste::paste_text(&result.clean, result.press_enter) {
                                 Ok(()) => {
@@ -230,13 +280,17 @@ struct App {
     worker_tx: Sender<WorkerCmd>,
     engine: Arc<Engine>,
     listening: Arc<AtomicBool>,
+    last_clean: Arc<Mutex<String>>,
+    scratch: bool,
     tray: Option<TrayIcon>,
-    /// Hidden window keeps the Win32 message pump alive for the tray.
     window: Option<Window>,
     overlay: Option<Overlay>,
     item_load: Option<MenuItem>,
     item_whisper: Option<MenuItem>,
     item_qwen: Option<MenuItem>,
+    item_hub: Option<MenuItem>,
+    item_scratch: Option<MenuItem>,
+    item_learn: Option<MenuItem>,
     item_quit: Option<MenuItem>,
 }
 
@@ -248,7 +302,7 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             } else {
                 let _ = self.proxy.send_event(UserEvent::Status(
-                    "Local Flow · hold Ctrl+Alt to dictate".into(),
+                    "Local Flow · tap Right Ctrl to dictate".into(),
                 ));
             }
         }
@@ -285,6 +339,16 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::HotkeyRelease => {
                 let _ = self.worker_tx.send(WorkerCmd::HoldEnd);
             }
+            UserEvent::HotkeyToggle => {
+                if self.listening.load(Ordering::SeqCst) {
+                    let _ = self.worker_tx.send(WorkerCmd::HoldEnd);
+                } else {
+                    if let Some(hud) = &mut self.overlay {
+                        hud.show("Listening…");
+                    }
+                    let _ = self.worker_tx.send(WorkerCmd::HoldStart);
+                }
+            }
             UserEvent::Menu(id) => {
                 if self.item_quit.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::Shutdown);
@@ -295,6 +359,13 @@ impl ApplicationHandler<UserEvent> for App {
                     let _ = self.worker_tx.send(WorkerCmd::DownloadWhisper);
                 } else if self.item_qwen.as_ref().is_some_and(|i| id == i.id()) {
                     let _ = self.worker_tx.send(WorkerCmd::DownloadQwen);
+                } else if self.item_hub.as_ref().is_some_and(|i| id == i.id()) {
+                    let _ = self.worker_tx.send(WorkerCmd::OpenHub);
+                } else if self.item_scratch.as_ref().is_some_and(|i| id == i.id()) {
+                    self.scratch = !self.scratch;
+                    let _ = self.worker_tx.send(WorkerCmd::SetScratch(self.scratch));
+                } else if self.item_learn.as_ref().is_some_and(|i| id == i.id()) {
+                    let _ = self.worker_tx.send(WorkerCmd::LearnClipboard);
                 }
             }
         }
@@ -327,12 +398,19 @@ impl App {
         self.window = Some(event_loop.create_window(attrs)?);
         self.overlay = Some(Overlay::create(event_loop)?);
 
+        let item_hub = MenuItem::new("Open Hub", true, None);
+        let item_scratch = MenuItem::new("Dictate to Scratch", true, None);
+        let item_learn = MenuItem::new("Learn from clipboard", true, None);
         let item_load = MenuItem::new("Load models", true, None);
-        let item_whisper = MenuItem::new("Download Whisper", true, None);
-        let item_qwen = MenuItem::new("Download Qwen3 (~1GB)", true, None);
+        let item_whisper = MenuItem::new("Download Whisper base-ru (~141MB)", true, None);
+        let item_qwen = MenuItem::new("Download Gemma 4 E2B (~3.2GB)", true, None);
         let item_quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
+        menu.append(&item_hub)?;
+        menu.append(&item_scratch)?;
+        menu.append(&item_learn)?;
+        menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&item_load)?;
         menu.append(&item_whisper)?;
         menu.append(&item_qwen)?;
@@ -341,17 +419,21 @@ impl App {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Local Flow — hold Ctrl+Alt")
+            .with_tooltip("Local Flow — tap Right Ctrl")
             .with_icon(make_icon())
             .build()?;
 
         self.item_load = Some(item_load);
         self.item_whisper = Some(item_whisper);
         self.item_qwen = Some(item_qwen);
+        self.item_hub = Some(item_hub);
+        self.item_scratch = Some(item_scratch);
+        self.item_learn = Some(item_learn);
         self.item_quit = Some(item_quit);
         self.tray = Some(tray);
         let _ = &self.engine;
         let _ = &self.listening;
+        let _ = &self.last_clean;
         Ok(())
     }
 }

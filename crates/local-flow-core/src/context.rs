@@ -81,7 +81,15 @@ impl DictationContext {
         .any(|h| blob.contains(h))
     }
 
+    /// Full context dump — for debugging / shells. Not for LLM cleanup
+    /// (chat/draft prose makes small models invent text).
     pub fn to_prompt_block(&self) -> String {
+        self.to_cleanup_hint()
+    }
+
+    /// Minimal disambiguation for Gemma: app + tone only.
+    /// Never include chat/draft/selection/recent — model copies that instead of ASR.
+    pub fn to_cleanup_hint(&self) -> String {
         let kind = if self.is_messenger() {
             "messenger"
         } else if self.is_editor() {
@@ -91,61 +99,34 @@ impl DictationContext {
         } else {
             "other"
         };
+        let app = if self.app_name.is_empty() {
+            "unknown"
+        } else {
+            self.app_name.as_str()
+        };
         let mut parts = vec![
-            format!(
-                "Focused app: {} ({})",
-                if self.app_name.is_empty() {
-                    "unknown"
-                } else {
-                    &self.app_name
-                },
-                if self.bundle_id.is_empty() {
-                    "—"
-                } else {
-                    &self.bundle_id
-                }
-            ),
-            format!("Surface kind: {kind}"),
+            format!("App: {app} ({kind})"),
+            "Context is ONLY for tone + fixing product-name ASR. Never copy, continue, or quote it."
+                .into(),
         ];
+        // Short title tokens only (file/channel name) — not message bodies.
         if !self.channel_hint.is_empty() {
-            parts.push(format!(
-                "Window / channel / file title (use for topic + vocabulary): {}",
-                self.channel_hint
-            ));
-        }
-        if !self.before_text.is_empty() {
-            parts.push(format!(
-                "Text already in the focused field (before/around cursor): {:?}",
-                self.before_text
-            ));
-        }
-        if !self.selected_text.is_empty() {
-            parts.push(format!("Selected text: {:?}", self.selected_text));
-        }
-        if !self.chat_lines.is_empty() {
-            parts
-                .push("Visible UI / messages / editor context (names, topics, homophones):".into());
-            for line in self.chat_lines.iter().rev().take(8).rev() {
-                let short: String = line.chars().take(160).collect();
-                parts.push(format!("- {short}"));
-            }
-        }
-        if !self.recent.is_empty() {
-            parts.push("Recent dictations in this app:".into());
-            for line in self.recent.iter().rev().take(8).rev() {
-                parts.push(format!("- {line}"));
-            }
+            let title: String = self.channel_hint.chars().take(60).collect();
+            parts.push(format!("Window title (vocab only): {title}"));
         }
         if !self.writing_style.is_empty() {
-            parts.push(format!(
-                "Writing style for this app: {}",
-                self.writing_style
-            ));
+            parts.push(format!("Tone: {}", self.writing_style.chars().take(80).collect::<String>()));
         }
-        parts.push(
-            "Adapt wording to this surface (casual chat vs code/editor vs docs). Keep spaces between words."
-                .into(),
-        );
+        if !self.custom_vocabulary.is_empty() {
+            let vocab = self
+                .custom_vocabulary
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("Vocab: {vocab}"));
+        }
         parts.join("\n")
     }
 

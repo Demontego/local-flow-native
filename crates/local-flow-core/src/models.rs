@@ -4,14 +4,19 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const WHISPER_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+/// Russian fine-tune of Whisper base (ggml for whisper.cpp). Not bundled in .dmg.
+/// Source: wabisabisocial/whisper-base-russian-ggml (CheeLi03/whisper-base-rus-8).
+pub const WHISPER_FILENAME: &str = "ggml-base-ru.bin";
+pub const WHISPER_URL: &str = concat!(
+    "https://huggingface.co/wabisabisocial/whisper-base-russian-ggml/resolve/main/",
+    "ggml-base-ru.bin"
+);
 
-/// Small text Qwen3 for cleanup (~1.1 GB). Not bundled in .dmg.
-pub const LLM_FILENAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
+/// Gemma 4 E2B instruct for cleanup (~3.2 GB). Not bundled in .dmg.
+pub const LLM_FILENAME: &str = "gemma-4-E2B-it-Q4_K_M.gguf";
 pub const LLM_URL: &str = concat!(
-    "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/",
-    "Qwen3-1.7B-Q4_K_M.gguf"
+    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/",
+    "gemma-4-E2B-it-Q4_K_M.gguf"
 );
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,7 +68,8 @@ impl DownloadResult {
 }
 
 fn whisper_ready(path: &Path) -> bool {
-    path.exists() && file_size(path) > 100_000_000
+    // ggml-base-ru ≈ 141 MB
+    path.exists() && file_size(path) > 50_000_000
 }
 
 fn llm_ready(path: &Path) -> bool {
@@ -98,7 +104,7 @@ pub fn download_whisper(
     })
 }
 
-/// Download Qwen3-1.7B Q4_K_M GGUF (~1.1 GB).
+/// Download Gemma 4 E2B Q4_K_M GGUF (~3.2 GB). Name kept for FFI compat.
 pub fn download_qwen(
     cfg: &EngineConfig,
     mut on_progress: impl FnMut(u32),

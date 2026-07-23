@@ -4,6 +4,8 @@ use crate::config::EngineConfig;
 use crate::context::DictationContext;
 use crate::error::{Error, Result};
 use crate::history;
+use crate::hub::{self, DictationDestination};
+use crate::learn;
 use crate::models::{self, ModelsStatus};
 use crate::personalization;
 use parking_lot::Mutex;
@@ -26,6 +28,7 @@ pub struct SessionResult {
     pub asr_confidence: Option<f32>,
     pub press_enter: bool,
     pub phase: SessionPhase,
+    pub destination: DictationDestination,
 }
 
 /// Shared engine used by all platform shells via FFI.
@@ -35,6 +38,9 @@ pub struct Engine {
     cleanup: Mutex<Option<CleanupEngine>>,
     phase: Mutex<SessionPhase>,
     pcm: Mutex<Vec<f32>>,
+    /// Progressive Whisper text while holding (overlay/cache). Not pasted until cleanup.
+    transcript_cache: Mutex<String>,
+    destination: Mutex<DictationDestination>,
     /// Serialize model loads (boot + menu "Load models" race → heuristic overwrite).
     load_lock: Mutex<()>,
 }
@@ -47,6 +53,8 @@ impl Engine {
             cleanup: Mutex::new(None),
             phase: Mutex::new(SessionPhase::Idle),
             pcm: Mutex::new(Vec::new()),
+            transcript_cache: Mutex::new(String::new()),
+            destination: Mutex::new(DictationDestination::Field),
             load_lock: Mutex::new(()),
         }
     }
@@ -78,12 +86,12 @@ impl Engine {
                 Ok(c) => (c, None),
                 Err(e) => {
                     tracing::warn!("llm load failed, heuristic: {e}");
-                    // Keep a previously loaded Qwen if reload failed (e.g. race).
+                    // Keep a previously loaded LLM if reload failed (e.g. race).
                     if let Some(prev) = self.cleanup.lock().as_ref() {
-                        if prev.backend_name == "qwen3" {
+                        if prev.backend_name == "gemma4" || prev.backend_name == "qwen3" {
                             let summary = format!(
-                                "asr={} cleanup=qwen3 (reload skipped: {e})",
-                                asr.backend_name
+                                "asr={} cleanup={} (reload skipped: {e})",
+                                asr.backend_name, prev.backend_name
                             );
                             *self.asr.lock() = Some(asr);
                             return Ok(summary);
@@ -116,6 +124,14 @@ impl Engine {
         Ok(r.to_wire())
     }
 
+    pub fn set_destination(&self, dest: DictationDestination) {
+        *self.destination.lock() = dest;
+    }
+
+    pub fn destination(&self) -> DictationDestination {
+        *self.destination.lock()
+    }
+
     pub fn start_hold(&self) -> Result<()> {
         let mut phase = self.phase.lock();
         if *phase != SessionPhase::Idle {
@@ -123,6 +139,7 @@ impl Engine {
         }
         *phase = SessionPhase::Listening;
         self.pcm.lock().clear();
+        self.transcript_cache.lock().clear();
         Ok(())
     }
 
@@ -138,11 +155,21 @@ impl Engine {
         let asr = self.asr.lock();
         let asr = asr.as_ref().ok_or(Error::ModelsNotLoaded)?;
         let pcm = self.pcm.lock();
-        if pcm.len() < (self.cfg.sample_rate as usize / 4) {
+        // Match AsrEngine floor (1s) — shorter clips used to be silence-padded
+        // and live-typed Whisper junk into the field.
+        if pcm.len() < self.cfg.sample_rate as usize {
             return Ok(String::new());
         }
-        asr.transcribe(&pcm, &self.cfg.language, None, 1)
-            .map(|result| result.text)
+        // Skip if a previous partial/final still holds the Whisper lock.
+        match asr.try_transcribe(&pcm, &self.cfg.language, None, 1)? {
+            Some(result) => {
+                if !result.text.trim().is_empty() {
+                    *self.transcript_cache.lock() = result.text.clone();
+                }
+                Ok(result.text)
+            }
+            None => Ok(self.transcript_cache.lock().clone()),
+        }
     }
 
     pub fn end_hold(&self, mut ctx: DictationContext) -> Result<SessionResult> {
@@ -163,25 +190,35 @@ impl Engine {
 
             let pcm = std::mem::take(&mut *self.pcm.lock());
             let secs = pcm.len() as f32 / self.cfg.sample_rate as f32;
-            let min = (self.cfg.sample_rate as f32 * 0.35) as usize;
+            // Match AsrEngine 1s floor — shorter clips used to pad silence → junk.
+            let min = self.cfg.sample_rate as usize;
             if pcm.len() < min {
+                self.transcript_cache.lock().clear();
                 return Ok(SessionResult {
-                    raw: format!("empty:audio={secs:.2}s (need ≥0.35s)"),
+                    raw: format!("empty:audio={secs:.2}s (need ≥1.0s)"),
                     clean: String::new(),
                     asr_confidence: None,
                     press_enter: false,
                     phase: SessionPhase::Idle,
+                    destination: *self.destination.lock(),
                 });
             }
 
+            let cached = std::mem::take(&mut *self.transcript_cache.lock());
             let prompt = ctx.asr_initial_prompt();
             let transcription = {
                 let asr = self.asr.lock();
                 let asr = asr.as_ref().ok_or(Error::ModelsNotLoaded)?;
-                asr.transcribe(&pcm, &self.cfg.language, prompt.as_deref(), 5)?
+                // Final pass on full buffer (catches audio after last partial tick).
+                asr.transcribe(&pcm, &self.cfg.language, prompt.as_deref(), 1)?
             };
-            let raw = transcription.text;
             let asr_confidence = transcription.mean_token_probability;
+            // Prefer final Whisper; fall back to hold-time cache if Metal/CPU returned empty.
+            let raw = if !transcription.text.trim().is_empty() {
+                transcription.text
+            } else {
+                cached
+            };
 
             if raw.trim().is_empty() {
                 return Ok(SessionResult {
@@ -190,6 +227,7 @@ impl Engine {
                     asr_confidence,
                     press_enter: false,
                     phase: SessionPhase::Idle,
+                    destination: *self.destination.lock(),
                 });
             }
 
@@ -197,9 +235,10 @@ impl Engine {
             let (clean, cleanup_decision) = if personalization.cleanup_enabled {
                 let cleanup = self.cleanup.lock();
                 let cleanup = cleanup.as_ref().ok_or(Error::ModelsNotLoaded)?;
+                let backend = cleanup.backend_name.clone();
                 match cleanup.cleanup(&raw, &ctx) {
                     Ok(candidate) if crate::cleanup::accepts_cleanup(&raw, &candidate, &ctx) => {
-                        (candidate, "qwen")
+                        (candidate, backend)
                     }
                     Ok(candidate) => {
                         log_quality(
@@ -211,19 +250,26 @@ impl Engine {
                         );
                         (
                             crate::cleanup::heuristic_polish(&raw, &ctx),
-                            "guarded fallback",
+                            "guarded fallback".into(),
                         )
                     }
                     Err(e) => {
                         tracing::warn!("cleanup failed, heuristic fallback: {e}");
+                        log_quality(
+                            &self.cfg,
+                            &raw,
+                            &format!("cleanup_err:{e}"),
+                            "cleanup error",
+                            asr_confidence,
+                        );
                         (
                             crate::cleanup::heuristic_polish(&raw, &ctx),
-                            "error fallback",
+                            "error fallback".into(),
                         )
                     }
                 }
             } else {
-                (raw.clone(), "disabled")
+                (raw.clone(), "disabled".into())
             };
             let smart = crate::cleanup::smart_format(&clean);
             let clean = personalization::expand_snippets(
@@ -234,7 +280,20 @@ impl Engine {
             if !clean.is_empty() && !ctx.bundle_id.is_empty() {
                 let _ = history::save_recent(&self.cfg.data_dir, &ctx.bundle_id, &clean);
             }
-            log_quality(&self.cfg, &raw, &clean, cleanup_decision, asr_confidence);
+            let dest = *self.destination.lock();
+            if !clean.is_empty() {
+                let _ = hub::record_dictation(
+                    &self.cfg.data_dir,
+                    &raw,
+                    &clean,
+                    &ctx.bundle_id,
+                    dest,
+                );
+                if dest == DictationDestination::ScratchPad {
+                    let _ = hub::add_note(&self.cfg.data_dir, &clean);
+                }
+            }
+            log_quality(&self.cfg, &raw, &clean, &cleanup_decision, asr_confidence);
 
             Ok(SessionResult {
                 raw,
@@ -242,6 +301,7 @@ impl Engine {
                 asr_confidence,
                 press_enter: smart.press_enter,
                 phase: SessionPhase::Idle,
+                destination: dest,
             })
         })();
 
@@ -252,6 +312,7 @@ impl Engine {
 
     pub fn cancel_hold(&self) {
         self.pcm.lock().clear();
+        self.transcript_cache.lock().clear();
         *self.phase.lock() = SessionPhase::Idle;
     }
 
@@ -276,6 +337,33 @@ impl Engine {
 
     pub fn recent_for(&self, bundle_id: &str) -> Vec<String> {
         history::load_recent(&self.cfg.data_dir, bundle_id)
+    }
+
+    pub fn hub_snapshot_json(&self) -> Result<String> {
+        hub::hub_snapshot_json(&self.cfg.data_dir)
+    }
+
+    pub fn add_scratch_note(&self, text: &str) -> Result<String> {
+        let note = hub::add_note(&self.cfg.data_dir, text)?;
+        Ok(note.id)
+    }
+
+    pub fn delete_scratch_note(&self, id: &str) -> Result<()> {
+        hub::delete_note(&self.cfg.data_dir, id)
+    }
+
+    pub fn learn_from_edit(&self, pasted: &str, edited: &str) -> Result<String> {
+        let rules = learn::learn_from_edit(&self.cfg.data_dir, pasted, edited)?;
+        serde_json::to_string(&rules).map_err(|e| Error::msg(e.to_string()))
+    }
+
+    pub fn undo_learned(&self, heard: &str) -> Result<bool> {
+        learn::undo_replacement(&self.cfg.data_dir, heard)
+    }
+
+    pub fn suggest_learn_json(&self, pasted: &str, edited: &str) -> String {
+        serde_json::to_string(&learn::suggest_replacements(pasted, edited))
+            .unwrap_or_else(|_| "[]".into())
     }
 }
 

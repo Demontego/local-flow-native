@@ -23,6 +23,7 @@ pub struct LFSessionResult {
     pub raw: *mut c_char,
     pub clean: *mut c_char,
     pub press_enter: c_int,
+    pub destination: *mut c_char,
 }
 
 fn cstr_to_string(p: *const c_char) -> String {
@@ -207,6 +208,13 @@ pub extern "C" fn lf_engine_download_qwen(
 }
 
 #[no_mangle]
+pub extern "C" fn lf_engine_set_destination_scratch(ptr: *mut LocalFlowEngine, scratch: c_int) {
+    if let Some(e) = eng(ptr) {
+        e.set_destination_scratch(scratch != 0);
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn lf_engine_start_hold(ptr: *mut LocalFlowEngine) -> c_int {
     match eng(ptr).and_then(|e| e.start_hold().ok()) {
         Some(()) => 0,
@@ -264,11 +272,13 @@ pub extern "C" fn lf_engine_end_hold(
             raw: to_cstring(&r.raw),
             clean: to_cstring(&r.clean),
             press_enter: i32::from(r.press_enter),
+            destination: to_cstring(&r.destination),
         })),
         Err(err) => Box::into_raw(Box::new(LFSessionResult {
             raw: to_cstring(&format!("error: {err}")),
             clean: to_cstring(""),
             press_enter: 0,
+            destination: to_cstring("field"),
         })),
     }
 }
@@ -301,6 +311,61 @@ pub extern "C" fn lf_session_result_free(r: *mut LFSessionResult) {
         let boxed = Box::from_raw(r);
         lf_string_free(boxed.raw);
         lf_string_free(boxed.clean);
+        lf_string_free(boxed.destination);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_hub_snapshot_json(ptr: *mut LocalFlowEngine) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("{}");
+    };
+    match e.hub_snapshot_json() {
+        Ok(json) => to_cstring(&json),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_learn_from_edit(
+    ptr: *mut LocalFlowEngine,
+    pasted: *const c_char,
+    edited: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("[]");
+    };
+    match e.learn_from_edit(cstr_to_string(pasted), cstr_to_string(edited)) {
+        Ok(json) => to_cstring(&json),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_undo_learned(
+    ptr: *mut LocalFlowEngine,
+    heard: *const c_char,
+) -> c_int {
+    let Some(e) = eng(ptr) else {
+        return 0;
+    };
+    match e.undo_learned(cstr_to_string(heard)) {
+        Ok(true) => 1,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_delete_scratch_note(
+    ptr: *mut LocalFlowEngine,
+    id: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("error: null engine");
+    };
+    match e.delete_scratch_note(cstr_to_string(id)) {
+        Ok(()) => to_cstring("ok"),
+        Err(err) => to_cstring(&format!("error: {err}")),
     }
 }
 

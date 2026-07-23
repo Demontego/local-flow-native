@@ -44,6 +44,47 @@ enum ContextCollector {
         return ctx
     }
 
+    /// Screen rect of focused field (for bubble placement). Cocoa coords.
+    static func focusedFieldScreenRect() -> NSRect? {
+        let sys = AXUIElementCreateSystemWide()
+        guard let raw = axCopy(sys, kAXFocusedUIElementAttribute as CFString) else { return nil }
+        let focused = unsafeBitCast(raw, to: AXUIElement.self)
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused, kAXPositionAttribute as CFString, &posRef
+        ) == .success,
+            AXUIElementCopyAttributeValue(
+                focused, kAXSizeAttribute as CFString, &sizeRef
+            ) == .success,
+            let posRef, let sizeRef
+        else { return nil }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &point),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        else { return nil }
+        // AX uses top-left global; convert to Cocoa bottom-left.
+        guard let screen = NSScreen.main else {
+            return NSRect(x: point.x, y: point.y, width: size.width, height: size.height)
+        }
+        let y = screen.frame.maxY - point.y - size.height
+        return NSRect(x: point.x, y: y, width: size.width, height: size.height)
+    }
+
+    /// Current value of focused text field (for post-paste learn).
+    static func focusedFieldValue() -> String? {
+        let sys = AXUIElementCreateSystemWide()
+        guard let raw = axCopy(sys, kAXFocusedUIElementAttribute as CFString) else { return nil }
+        let focused = unsafeBitCast(raw, to: AXUIElement.self)
+        return axOptionalString(focused, kAXValueAttribute as CFString)
+    }
+
+    /// Selected text in focused field.
+    static func selectedText() -> String {
+        gather().selectedText
+    }
+
     /// True if inserting at the caret should start with a space (letter/digit before cursor).
     static func cursorNeedsLeadingSpace() -> Bool {
         let sys = AXUIElementCreateSystemWide()

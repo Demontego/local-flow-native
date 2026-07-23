@@ -1,4 +1,6 @@
-use local_flow_core::cleanup::{accepts_cleanup, heuristic_polish, smart_format, CleanupEngine};
+use local_flow_core::cleanup::{
+    accepts_cleanup, apply_common_asr_fixes, heuristic_polish, smart_format, CleanupEngine,
+};
 use local_flow_core::config::EngineConfig;
 use local_flow_core::context::DictationContext;
 use local_flow_core::personalization::{
@@ -7,34 +9,23 @@ use local_flow_core::personalization::{
 use local_flow_core::session::Engine;
 
 #[test]
-fn kot_to_kod_in_tech_chat() {
-    let ctx = DictationContext {
-        channel_hint: "Thread engineering".into(),
-        chat_lines: vec!["надо поправить сервис".into()],
-        ..Default::default()
-    };
-    let out = heuristic_polish("Да больше не пишем кот.", &ctx);
-    assert!(out.to_lowercase().contains("код"), "got {out}");
-    assert!(!out.to_lowercase().contains("кот"));
+fn common_asr_fixes_qwen_cursor_vvod() {
+    let out = apply_common_asr_fixes(
+        "а проверка голосового вода в курсуаре пытаюсье чтобы гвен нормальный текст выдал с точками запятыми",
+    );
+    assert!(out.contains("голосового ввода"), "{out}");
+    assert!(out.contains("Cursor"), "{out}");
+    assert!(out.contains("Qwen"), "{out}");
+    assert!(out.contains("пытаюсь"), "{out}");
+    assert!(!out.contains("гвен"), "{out}");
 }
 
 #[test]
-fn gazovogo_voda_to_golosovogo_vvoda() {
-    let ctx = DictationContext {
-        app_name: "Cursor".into(),
-        bundle_id: "com.todesktop.230313mzl4w4u92".into(),
-        ..Default::default()
-    };
-    assert!(ctx.is_editor());
-    let out = heuristic_polish("Газового вода", &ctx);
+fn heuristic_strips_fillers() {
+    let out = heuristic_polish("ну типа привет мир", &DictationContext::default());
     let low = out.to_lowercase();
-    assert!(low.contains("голосового ввода"), "got {out}");
-    assert!(!low.contains("газового"), "got {out}");
-    assert!(
-        !low.split_whitespace()
-            .any(|w| w.trim_matches(|c: char| !c.is_alphabetic()) == "вода"),
-        "got {out}"
-    );
+    assert!(low.contains("привет"), "got {out}");
+    assert!(!low.contains("ну типа"), "got {out}");
 }
 
 #[test]
@@ -42,11 +33,12 @@ fn engine_session_fsm_smoke() {
     let data = tempfile::tempdir().unwrap();
     let eng = Engine::new(EngineConfig::new(data.path()));
     let summary = eng.load_models().unwrap();
-    // stub/heuristic if models missing; whisper/qwen3 when downloaded
+    // stub/heuristic if models missing; whisper/gemma4 when downloaded
     assert!(
         summary.contains("heuristic")
             || summary.contains("stub")
             || summary.contains("whisper")
+            || summary.contains("gemma")
             || summary.contains("qwen")
     );
     eng.start_hold().unwrap();
@@ -59,12 +51,10 @@ fn engine_session_fsm_smoke() {
 #[test]
 fn cleanup_engine_heuristic() {
     let c = CleanupEngine::heuristic();
-    let ctx = DictationContext {
-        channel_hint: "devops".into(),
-        ..Default::default()
-    };
-    let out = c.cleanup("ну типа привет кот", &ctx).unwrap();
-    assert!(out.to_lowercase().contains("код") || out.to_lowercase().contains("привет"));
+    let out = c
+        .cleanup("ну типа привет мир", &DictationContext::default())
+        .unwrap();
+    assert!(out.to_lowercase().contains("привет"), "got {out}");
 }
 
 #[test]
@@ -85,7 +75,7 @@ fn qwen_cleanup_smoke_if_present() {
         ..Default::default()
     };
     let out = eng
-        .cleanup("Да больше не пишем кот.", &ctx)
+        .cleanup("Да больше не пишем код.", &ctx)
         .expect("cleanup");
     eprintln!("qwen out: {out}");
     assert!(!out.is_empty());
@@ -167,18 +157,50 @@ fn cleanup_guard_rejects_semantic_collapse() {
         "ввода",
         &ctx
     ));
+    // Real paste.log: Qwen chopped the opening ("я хочу проверить…") and kept the tail.
+    assert!(!accepts_cleanup(
+        "я хочу проверить свой ввод поэтому я надектовываю текст вот хочу чтобы текст почистился после ковьяна вот я немного приболел поэтому голосу на немного другой вот так проверяем теперь как ведётся текст",
+        "вот текст почистился после ковьяна вот я немного приболел поэтому голосу на немного другой вот так проверяем теперь как ведётся текст",
+        &ctx
+    ));
 }
 
 #[test]
-fn cleanup_guard_accepts_unambiguous_dictionary_style_correction() {
+fn cleanup_guard_accepts_light_polish() {
     let ctx = DictationContext {
         app_name: "Cursor".into(),
         bundle_id: "com.todesktop.230313mzl4w4u92".into(),
         ..Default::default()
     };
     assert!(accepts_cleanup(
-        "проверка газового вода в курсоре",
+        "проверка голосового ввода в курсоре",
         "Проверка голосового ввода в Cursor.",
+        &ctx
+    ));
+}
+
+#[test]
+fn cleanup_guard_accepts_heavy_asr_repair() {
+    let ctx = DictationContext {
+        app_name: "Cursor".into(),
+        bundle_id: "com.todesktop.230313mzl4w4u92".into(),
+        ..Default::default()
+    };
+    // Real dirty Whisper → what Gemma should be allowed to keep.
+    assert!(accepts_cleanup(
+        "а проверка голосового вода в курсуаре пытаюсье чтобы гвен нормальный текст выдал с точками запятыми",
+        "А проверка голосового ввода в Cursor. Пытаюсь, чтобы Qwen нормальный текст выдал с точками и запятыми.",
+        &ctx
+    ));
+}
+
+#[test]
+fn cleanup_guard_rejects_context_hallucination() {
+    let ctx = DictationContext::default();
+    // Short dictation + long prose stolen from editor/chat context.
+    assert!(!accepts_cleanup(
+        "привет как дела",
+        "Привет, как дела? Давай завтра созвонимся по поводу релиза сервиса и поправим баг в worker.rs после ревью.",
         &ctx
     ));
 }

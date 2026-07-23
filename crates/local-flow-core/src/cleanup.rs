@@ -96,31 +96,65 @@ impl CleanupBackend for HeuristicCleanup {
     }
 }
 
-pub fn heuristic_polish(raw: &str, ctx: &DictationContext) -> String {
-    let mut t = raw.trim().to_string();
+pub fn heuristic_polish(raw: &str, _ctx: &DictationContext) -> String {
+    let mut t = apply_common_asr_fixes(raw.trim());
     for filler in ["ну типа ", "ну ", "типа ", "ээ ", "эм ", "hmm ", "uh "] {
         while let Some(rest) = t.strip_prefix(filler) {
             t = rest.to_string();
         }
         t = t.replace(filler, " ");
     }
-    t = asr_homophone_fix(&t, ctx);
     t = collapse_ws(&t);
     capitalize_sentence(&t)
 }
 
+/// Small LLMs often echo ASR unchanged (paste.log). Deterministic fixes for
+/// high-frequency RU phonetic → intended terms. Longer phrases first.
+pub fn apply_common_asr_fixes(text: &str) -> String {
+    let mut t = text.to_string();
+    // Longer / more specific first (replace_ci is plain substring).
+    for (from, to) in [
+        ("голосового вода", "голосового ввода"),
+        ("голосовое вода", "голосовой ввод"),
+        ("газового вода", "голосового ввода"),
+        ("велосипедового вода", "голосового ввода"),
+        ("в курсуаре", "в Cursor"),
+        ("в курсуоре", "в Cursor"),
+        ("курсуаре", "Cursor"),
+        ("пытаюсье", "пытаюсь"),
+        ("вестите", "ввести"),
+        ("веряем", "проверяем"),
+        ("с точками запятыми", "с точками и запятыми"),
+        ("с.ми запятыми", "с точками и запятыми"),
+        ("гвен", "Qwen"),
+        ("квен", "Qwen"),
+        ("квэн", "Qwen"),
+        ("пьен", "Qwen"),
+        ("гемм-4", "Gemma 4"),
+        ("гемма 4", "Gemma 4"),
+        ("гемма4", "Gemma 4"),
+        ("гемма", "Gemma"),
+        ("виспер", "Whisper"),
+        ("гитхаб", "GitHub"),
+    ] {
+        t = replace_ci(&t, from, to);
+    }
+    t
+}
+
 /// Reject cleanup that likely summarized or hallucinated instead of polishing ASR.
-/// Short utterances stay permissive because a single dictionary correction changes
-/// every token (for example, "газового вода" → "голосового ввода").
-pub fn accepts_cleanup(raw: &str, candidate: &str, ctx: &DictationContext) -> bool {
-    let raw = asr_homophone_fix(raw, ctx);
+/// Phonetic / morphology fixes must pass — otherwise Gemma edits get thrown away.
+pub fn accepts_cleanup(raw: &str, candidate: &str, _ctx: &DictationContext) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return false;
     }
 
-    let raw_words = meaningful_words(&raw);
-    if candidate.chars().count() * 100 < raw.chars().count() * 45 {
+    let raw_words = meaningful_words(raw);
+    let raw_len = raw.chars().count().max(1);
+    let cand_len = candidate.chars().count();
+    // Collapse = summary; large growth = invented from app context.
+    if cand_len * 100 < raw_len * 55 || cand_len * 100 > raw_len * 140 {
         return false;
     }
     if raw_words.len() <= 4 {
@@ -134,68 +168,101 @@ pub fn accepts_cleanup(raw: &str, candidate: &str, ctx: &DictationContext) -> bo
 
     let retained = raw_words
         .iter()
-        .filter(|word| candidate_words.iter().any(|candidate| candidate == *word))
+        .filter(|word| candidate_words.iter().any(|c| words_align(word, c)))
         .count();
-    retained * 100 >= raw_words.len() * 60
+    // ASR repair changes many tokens; 50% fuzzy-align is enough to catch true summaries.
+    if retained * 100 < raw_words.len() * 50 {
+        return false;
+    }
+
+    // Reject prose lifted from UI: many new Cyrillic words not grounded in ASR.
+    // ASCII tokens (Cursor, Qwen, …) are allowed as product-name fixes.
+    let novel = candidate_words
+        .iter()
+        .filter(|c| {
+            !raw_words.iter().any(|r| words_align(r, c)) && !is_ascii_product_token(c)
+        })
+        .count();
+    if novel * 100 > candidate_words.len() * 30 {
+        return false;
+    }
+
+    // Opening must stay at the start (reject mid-thought summaries that keep the tail).
+    let open_n = raw_words.len().min(3);
+    let cand_head = &candidate_words[..candidate_words.len().min(8)];
+    let open_hits = raw_words[..open_n]
+        .iter()
+        .filter(|w| cand_head.iter().any(|c| words_align(w, c)))
+        .count();
+    open_hits * 100 >= open_n * 50
+}
+
+fn is_ascii_product_token(w: &str) -> bool {
+    let n = w.chars().count();
+    n >= 2 && n <= 24 && w.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn meaningful_words(text: &str) -> Vec<String> {
     const FILLERS: &[&str] = &["ну", "типа", "ээ", "эм", "hmm", "uh", "like"];
     text.split(|c: char| !c.is_alphanumeric())
         .map(|word| word.to_lowercase())
-        .filter(|word| word.len() > 1 && !FILLERS.contains(&word.as_str()))
+        .filter(|word| word.chars().count() > 1 && !FILLERS.contains(&word.as_str()))
         .collect()
 }
 
-/// Deterministic Whisper-RU fixes. Applied after Qwen too — model often keeps these.
-pub fn asr_homophone_fix(raw: &str, ctx: &DictationContext) -> String {
-    let mut t = raw.to_string();
-    // Phrase-level first (order matters).
-    let phrases: &[(&str, &str)] = &[
-        ("газового вода", "голосового ввода"),
-        ("газового ввода", "голосового ввода"),
-        ("газовой воды", "голосового ввода"),
-        ("газовая вода", "голосовой ввод"),
-        ("газовый вода", "голосовой ввод"),
-        ("газовый ввод", "голосовой ввод"),
-        ("газовая ввода", "голосового ввода"),
-        ("голосового вода", "голосового ввода"),
-        ("голосовой вода", "голосовой ввод"),
-        ("в куроре", "в курсоре"),
-        ("в кур соре", "в курсоре"),
-    ];
-    for (from, to) in phrases {
-        t = replace_ci(&t, from, to);
+/// Exact, stem, or small edit-distance match (вода↔ввода, курсуаре↔cursor).
+fn words_align(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
     }
-    if ctx.is_tech_chat() || ctx.is_editor() {
-        t = regex_replace_word(&t, "кот", "код");
-        t = regex_replace_word(&t, "кота", "кода");
-        t = regex_replace_word(&t, "коту", "коду");
-        // Lone "газового/газовый" almost always "голосового" in editor dictation.
-        t = regex_replace_word(&t, "газового", "голосового");
-        t = regex_replace_word(&t, "газовый", "голосовой");
-        t = regex_replace_word(&t, "газовой", "голосовой");
-        t = regex_replace_word(&t, "газовое", "голосовое");
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    if ac.is_empty() || bc.is_empty() {
+        return false;
     }
-    t
+    let min_c = ac.len().min(bc.len());
+    let max_c = ac.len().max(bc.len());
+    // Shared stem (morphology / ending noise).
+    if min_c >= 4 {
+        let stem = min_c.saturating_sub(2).max(4).min(min_c);
+        if ac[..stem] == bc[..stem] {
+            return true;
+        }
+    }
+    // Short Levenshtein for ASR near-misses and Latin↔Cyrillic product names of similar length.
+    if max_c <= 14 && min_c * 100 >= max_c * 45 {
+        let dist = levenshtein(&ac, &bc);
+        if dist <= 2 || (max_c >= 5 && dist * 100 <= max_c * 40) {
+            return true;
+        }
+    }
+    false
+}
+
+fn levenshtein(a: &[char], b: &[char]) -> usize {
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
 }
 
 fn replace_ci(text: &str, from: &str, to: &str) -> String {
     let re = regex::Regex::new(&format!("(?i){}", regex::escape(from))).unwrap();
     re.replace_all(text, to).into_owned()
-}
-
-fn regex_replace_word(text: &str, from: &str, to: &str) -> String {
-    // No lookaround (default regex). Delimiters captured on both sides.
-    let re = regex::Regex::new(&format!(
-        r"(?i)(^|[\s\p{{P}}]){}([\s\p{{P}}]|$)",
-        regex::escape(from)
-    ))
-    .unwrap();
-    re.replace_all(text, |caps: &regex::Captures| {
-        format!("{}{}{}", &caps[1], to, &caps[2])
-    })
-    .into_owned()
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -219,8 +286,11 @@ fn capitalize_sentence(s: &str) -> String {
 
 fn strip_model_noise(text: &str) -> String {
     let mut t = text.trim().to_string();
-    if let Some(idx) = t.rfind("</think>") {
-        t = t[idx + "</think>".len()..].trim().to_string();
+    // Qwen thinking / Gemma channel dumps — keep only final answer.
+    for marker in ["</think>", "<|channel|>"] {
+        if let Some(idx) = t.rfind(marker) {
+            t = t[idx + marker.len()..].trim().to_string();
+        }
     }
     if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
         t = t[1..t.len() - 1].to_string();
@@ -249,7 +319,7 @@ impl CleanupEngine {
         {
             return Ok(Self {
                 inner: Arc::new(llama_backend::LlamaCleanup::load(model, system_prompt)?),
-                backend_name: "qwen3".into(),
+                backend_name: "gemma4".into(),
             });
         }
         #[cfg(not(feature = "llama"))]
@@ -260,11 +330,34 @@ impl CleanupEngine {
     }
 
     pub fn cleanup(&self, raw: &str, ctx: &DictationContext) -> Result<String> {
-        let mut out = strip_model_noise(&self.inner.cleanup(raw, ctx)?);
-        out = asr_homophone_fix(&out, ctx);
-        out = collapse_ws(&out);
+        // Pre-fix so the LLM sees corrected terms; post-fix if it echoes ASR.
+        let raw = apply_common_asr_fixes(raw);
+        let mut out = strip_model_noise(&self.inner.cleanup(&raw, ctx)?);
+        // Keep newlines / punctuation spacing Gemma added — only squash space runs.
+        out = normalize_llm_whitespace(&out);
+        out = apply_common_asr_fixes(&out);
         Ok(out)
     }
+}
+
+fn normalize_llm_whitespace(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(" ,", ",")
+                .replace(" .", ".")
+                .replace(" !", "!")
+                .replace(" ?", "?")
+                .replace(" :", ":")
+                .replace(" ;", ";")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\n\n\n", "\n\n")
+        .trim()
+        .to_string()
 }
 
 #[cfg(feature = "llama")]
@@ -274,7 +367,7 @@ mod llama_backend {
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
     use llama_cpp_2::model::params::LlamaModelParams;
-    use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+    use llama_cpp_2::model::{AddBos, LlamaModel};
     use llama_cpp_2::sampling::LlamaSampler;
     use parking_lot::Mutex;
     use std::num::NonZeroU32;
@@ -313,14 +406,18 @@ mod llama_backend {
     impl LlamaCleanup {
         pub fn load(model_path: &Path, system_prompt: &str) -> Result<Self> {
             let backend = shared_backend()?;
-            // ponytail: CPU only — whisper already owns Metal; dual ggml-metal
-            // residency sets abort in sampler / atexit. Upgrade: serialize one Metal device.
+            // Whisper runs CPU-only — Gemma can take Metal. Huge win on Apple silicon.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            let params = LlamaModelParams::default().with_n_gpu_layers(999);
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             let params = LlamaModelParams::default().with_n_gpu_layers(0);
             let model = LlamaModel::load_from_file(backend, model_path, &params)
                 .map_err(|e| Error::Cleanup(format!("load gguf: {e}")))?;
+            // Full cleanup.txt is short enough; truncating it starved edit instructions.
+            let system = truncate_chars(system_prompt.trim(), 1800);
             Ok(Self {
                 model,
-                system: system_prompt.to_string(),
+                system,
                 lock: Mutex::new(()),
             })
         }
@@ -329,82 +426,82 @@ mod llama_backend {
     impl CleanupBackend for LlamaCleanup {
         fn cleanup(&self, raw: &str, ctx: &DictationContext) -> Result<String> {
             let _guard = self.lock.lock();
-            // Compact context — huge AX dumps blow n_ctx and ggml_abort in sampler.
-            let block = truncate_chars(&ctx.to_prompt_block(), 1800);
-            let raw = truncate_chars(raw.trim(), 800);
-            // /no_think — Qwen3 thinking mode off (faster, no <think> dump)
+            let hint = truncate_chars(&ctx.to_cleanup_hint(), 200);
+            let raw = truncate_chars(raw.trim(), 900);
+            // Dictation first — never bury ASR under UI prose.
             let user = format!(
-                "/no_think\n\
-                 Clean dictation for the focused app/window. \
-                 Use app + window title + context for homophones. \
-                 Keep spaces between words. Output only final text.\n\n\
-                 {block}\n\n\
-                 Dictation:\n\n{raw}"
+                "SOURCE OF TRUTH = Dictation below. Polish ONLY that text.\n\
+                 Do NOT copy, continue, or invent from app/window context.\n\
+                 MUST: fix ASR endings/homophones, product names → Latin \
+                 (Cursor, Qwen, Whisper, GitHub), add punctuation, drop fillers (ну/типа/ээ).\n\
+                 Keep every clause from Dictation — no summary, no extra sentences.\n\
+                 Ex: «голосового вода в курсуаре … гвен» → «голосового ввода в Cursor … Qwen».\n\n\
+                 Dictation:\n{raw}\n\n\
+                 Hint (tone/vocab only, do not quote):\n{hint}\n\n\
+                 Cleaned text:"
             );
-            let msgs = [
-                LlamaChatMessage::new("system".into(), self.system.clone())
-                    .map_err(|e| Error::Cleanup(e.to_string()))?,
-                LlamaChatMessage::new("user".into(), user)
-                    .map_err(|e| Error::Cleanup(e.to_string()))?,
-            ];
-            let tmpl = self
-                .model
-                .chat_template(None)
-                .map_err(|e| Error::Cleanup(format!("chat template: {e}")))?;
-            let prompt = self
-                .model
-                .apply_chat_template(&tmpl, &msgs, true)
-                .map_err(|e| Error::Cleanup(e.to_string()))?;
+            // Gemma 4 Jinja chat_template fails in llama-cpp minja (ffi -1).
+            let prompt = format_gemma4_prompt(&self.system, &user);
 
-            const N_CTX: u32 = 2048;
-            const N_GEN: usize = 128;
-            // Default n_batch is smaller than a fat prompt → decode/sample ggml_abort.
+            // Room for punctuation + mild rewrites (not just echo).
+            let n_gen = (raw.chars().count() * 3 / 4 + 64).clamp(96, 512);
+            const N_CTX: u32 = 3072;
+            let n_threads = std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(4)
+                .clamp(2, 8);
             let ctx_params = LlamaContextParams::default()
                 .with_n_ctx(Some(NonZeroU32::new(N_CTX).unwrap()))
-                .with_n_batch(N_CTX)
-                .with_n_ubatch(N_CTX);
+                .with_n_batch(512)
+                .with_n_ubatch(512)
+                .with_n_threads(n_threads)
+                .with_n_threads_batch(n_threads)
+                .with_offload_kqv(true);
             let mut lctx = self
                 .model
                 .new_context(shared_backend()?, ctx_params)
-                .map_err(|e| Error::Cleanup(e.to_string()))?;
+                .map_err(|e| Error::Cleanup(format!("new_context: {e}")))?;
 
             let mut tokens = self
                 .model
-                .str_to_token(&prompt, AddBos::Always)
-                .map_err(|e| Error::Cleanup(e.to_string()))?;
+                .str_to_token(&prompt, AddBos::Never)
+                .map_err(|e| Error::Cleanup(format!("tokenize: {e}")))?;
             if tokens.is_empty() {
                 return Err(Error::Cleanup("empty prompt tokens".into()));
             }
-            let max_prompt = (N_CTX as usize).saturating_sub(N_GEN);
+            let max_prompt = (N_CTX as usize).saturating_sub(n_gen);
             if tokens.len() > max_prompt {
-                // Keep BOS + tail (instruction end + dictation matter most).
-                let bos = tokens[0];
+                let head = tokens[0];
                 let skip = tokens.len() - (max_prompt - 1);
-                tokens = std::iter::once(bos)
+                tokens = std::iter::once(head)
                     .chain(tokens.into_iter().skip(skip))
                     .collect();
             }
 
             let n = tokens.len();
-            let mut batch = LlamaBatch::new(n.max(512), 1);
-            let last = n - 1;
-            for (i, token) in tokens.into_iter().enumerate() {
-                batch
-                    .add(token, i as i32, &[0], i == last)
-                    .map_err(|e| Error::Cleanup(e.to_string()))?;
+            let mut batch = LlamaBatch::new(512, 1);
+            let mut i = 0;
+            while i < n {
+                batch.clear();
+                let end = (i + 512).min(n);
+                for (j, &token) in tokens[i..end].iter().enumerate() {
+                    let pos = (i + j) as i32;
+                    let logits = i + j == n - 1;
+                    batch
+                        .add(token, pos, &[0], logits)
+                        .map_err(|e| Error::Cleanup(format!("batch.add prompt@{pos}: {e}")))?;
+                }
+                lctx.decode(&mut batch)
+                    .map_err(|e| Error::Cleanup(format!("decode prompt {i}..{end}/{n}: {e}")))?;
+                i = end;
             }
-            lctx.decode(&mut batch)
-                .map_err(|e| Error::Cleanup(e.to_string()))?;
 
-            // sample idx = -1 → last logits from the previous decode (only last
-            // prompt token requested logits). Absolute pos (n-1) crashes:
-            // get_logits_ith: batch.logits[i] != true
             let mut sampler =
-                LlamaSampler::chain_simple([LlamaSampler::temp(0.0), LlamaSampler::greedy()]);
+                LlamaSampler::chain_simple([LlamaSampler::temp(0.2), LlamaSampler::greedy()]);
             let mut out = String::new();
             let mut n_cur = n as i32;
             let n_ctx = N_CTX as i32;
-            for _ in 0..N_GEN {
+            for step in 0..n_gen {
                 if n_cur >= n_ctx {
                     break;
                 }
@@ -416,18 +513,34 @@ mod llama_backend {
                 let bytes = self
                     .model
                     .token_to_piece_bytes(token, 32, false, None)
-                    .map_err(|e| Error::Cleanup(e.to_string()))?;
+                    .map_err(|e| Error::Cleanup(format!("token_to_piece@{step}: {e}")))?;
                 out.push_str(&String::from_utf8_lossy(&bytes));
+                // Stop if model dumps a new turn marker.
+                if out.contains("<|turn>") || out.contains("<turn|>") {
+                    if let Some(cut) = out.find("<|turn>").or_else(|| out.find("<turn|>")) {
+                        out.truncate(cut);
+                    }
+                    break;
+                }
                 batch.clear();
                 batch
                     .add(token, n_cur, &[0], true)
-                    .map_err(|e| Error::Cleanup(e.to_string()))?;
+                    .map_err(|e| Error::Cleanup(format!("batch.add gen@{step}: {e}")))?;
                 lctx.decode(&mut batch)
-                    .map_err(|e| Error::Cleanup(e.to_string()))?;
+                    .map_err(|e| Error::Cleanup(format!("decode gen@{step}: {e}")))?;
                 n_cur += 1;
             }
             Ok(out)
         }
+    }
+
+    /// Gemma 4 IT turn protocol (no `<|think|>`).
+    fn format_gemma4_prompt(system: &str, user: &str) -> String {
+        format!(
+            "<|turn>system\n{}\n<turn|>\n<|turn>user\n{}\n<turn|>\n<|turn>model\n",
+            system.trim(),
+            user.trim()
+        )
     }
 
     fn truncate_chars(s: &str, max: usize) -> String {

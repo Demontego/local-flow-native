@@ -5,11 +5,14 @@ import CoreGraphics
 
 enum Permissions {
     private static let axSettingsOpenedKey = "lwf.axSettingsOpenedOnce"
+    private static let onboardingDoneKey = "lwf.onboardingV2Done"
 
     enum OnboardingStep: Equatable {
         case requestMicrophone
         case openMicrophoneSettings
         case openAccessibilitySettings
+        case openInputMonitoringSettings
+        case downloadModels
         case ready
 
         var message: String {
@@ -20,8 +23,12 @@ enum Permissions {
                 "Microphone is off. Enable it in System Settings"
             case .openAccessibilitySettings:
                 "Enable Accessibility to paste into any app"
+            case .openInputMonitoringSettings:
+                "Enable Input Monitoring so Tap fn works"
+            case .downloadModels:
+                "Download Whisper (+ Gemma for cleanup), then Load models"
             case .ready:
-                "Ready — hold Ctrl+Option (or LF)"
+                "Ready — tap fn to dictate"
             }
         }
 
@@ -33,6 +40,10 @@ enum Permissions {
                 "Open Microphone Settings"
             case .openAccessibilitySettings:
                 "Open Accessibility Settings"
+            case .openInputMonitoringSettings:
+                "Open Input Monitoring"
+            case .downloadModels:
+                "Got it"
             case .ready:
                 nil
             }
@@ -40,11 +51,9 @@ enum Permissions {
     }
 
     static func isAccessibilityTrusted() -> Bool {
-        // Silent check — never pass prompt:true here (that dialog every launch).
         AXIsProcessTrusted()
     }
 
-    /// Open System Settings once (no modal AX prompt). TCC sticks only with stable codesign.
     static func remindAccessibilitySettingsIfNeeded() {
         guard !isAccessibilityTrusted() else { return }
         let defaults = UserDefaults.standard
@@ -53,7 +62,6 @@ enum Permissions {
         openAccessibilitySettings()
     }
 
-    /// Input Monitoring (needed for Ctrl+Option via CGEvent tap).
     static func canListenEvents() -> Bool {
         if #available(macOS 10.15, *) {
             return CGPreflightListenEventAccess()
@@ -61,7 +69,6 @@ enum Permissions {
         return true
     }
 
-    /// Request listen access once when arming hotkey — not on every cold start if already decided.
     @discardableResult
     static func requestListenEvents() -> Bool {
         if #available(macOS 10.15, *) {
@@ -86,15 +93,29 @@ enum Permissions {
         }
     }
 
-    static func onboardingStep() -> OnboardingStep {
+    static func onboardingStep(modelsReady: Bool = true) -> OnboardingStep {
         switch micStatus() {
         case .notDetermined:
             return .requestMicrophone
         case .authorized:
-            return isAccessibilityTrusted() ? .ready : .openAccessibilitySettings
+            break
         default:
             return .openMicrophoneSettings
         }
+        if !isAccessibilityTrusted() {
+            return .openAccessibilitySettings
+        }
+        if !canListenEvents() {
+            return .openInputMonitoringSettings
+        }
+        if !modelsReady {
+            return .downloadModels
+        }
+        return .ready
+    }
+
+    static func markOnboardingSeen() {
+        UserDefaults.standard.set(true, forKey: onboardingDoneKey)
     }
 
     static func perform(_ step: OnboardingStep, done: @escaping () -> Void) {
@@ -105,8 +126,17 @@ enum Permissions {
             }
         case .openMicrophoneSettings:
             openMicrophoneSettings()
+            done()
         case .openAccessibilitySettings:
             openAccessibilitySettings()
+            done()
+        case .openInputMonitoringSettings:
+            _ = requestListenEvents()
+            openInputMonitoringSettings()
+            done()
+        case .downloadModels:
+            markOnboardingSeen()
+            done()
         case .ready:
             break
         }

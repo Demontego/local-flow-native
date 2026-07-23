@@ -22,7 +22,7 @@ impl EngineConfig {
         let models = data_dir.join("models");
         Self {
             data_dir,
-            whisper_model: models.join("ggml-small.bin"),
+            whisper_model: models.join(crate::models::WHISPER_FILENAME),
             llm_model: models.join(crate::models::LLM_FILENAME),
             sample_rate: 16_000,
             language: "ru".into(),
@@ -45,11 +45,11 @@ mod tests {
         let config = EngineConfig::new("shell-data");
         assert_eq!(
             config.whisper_model,
-            Path::new("shell-data/models/ggml-small.bin")
+            Path::new("shell-data/models/ggml-base-ru.bin")
         );
         assert_eq!(
             config.llm_model,
-            Path::new("shell-data/models/Qwen3-1.7B-Q4_K_M.gguf")
+            Path::new("shell-data/models/gemma-4-E2B-it-Q4_K_M.gguf")
         );
     }
 }

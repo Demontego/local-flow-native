@@ -69,6 +69,8 @@ pub struct FfiSessionResult {
     pub raw: String,
     pub clean: String,
     pub press_enter: bool,
+    /// "field" | "scratch_pad"
+    pub destination: String,
 }
 
 #[derive(uniffi::Object)]
@@ -116,6 +118,15 @@ impl LocalFlowEngine {
         Ok(self.inner.download_qwen(|_| {})?)
     }
 
+    pub fn set_destination_scratch(&self, scratch: bool) {
+        use local_flow_core::DictationDestination;
+        self.inner.set_destination(if scratch {
+            DictationDestination::ScratchPad
+        } else {
+            DictationDestination::Field
+        });
+    }
+
     pub fn start_hold(&self) -> Result<(), FlowError> {
         Ok(self.inner.start_hold()?)
     }
@@ -130,10 +141,16 @@ impl LocalFlowEngine {
 
     pub fn end_hold(&self, ctx: FfiContext) -> Result<FfiSessionResult, FlowError> {
         let r = self.inner.end_hold(ctx.into())?;
+        let destination = match r.destination {
+            local_flow_core::DictationDestination::ScratchPad => "scratch_pad",
+            local_flow_core::DictationDestination::Field => "field",
+        }
+        .to_string();
         Ok(FfiSessionResult {
             raw: r.raw,
             clean: r.clean,
             press_enter: r.press_enter,
+            destination,
         })
     }
 
@@ -164,6 +181,22 @@ impl LocalFlowEngine {
     pub fn recent_json(&self, bundle_id: String) -> Result<String, FlowError> {
         serde_json::to_string(&self.inner.recent_for(&bundle_id))
             .map_err(|e| FlowError::Message { msg: e.to_string() })
+    }
+
+    pub fn hub_snapshot_json(&self) -> Result<String, FlowError> {
+        Ok(self.inner.hub_snapshot_json()?)
+    }
+
+    pub fn learn_from_edit(&self, pasted: String, edited: String) -> Result<String, FlowError> {
+        Ok(self.inner.learn_from_edit(&pasted, &edited)?)
+    }
+
+    pub fn undo_learned(&self, heard: String) -> Result<bool, FlowError> {
+        Ok(self.inner.undo_learned(&heard)?)
+    }
+
+    pub fn delete_scratch_note(&self, id: String) -> Result<(), FlowError> {
+        Ok(self.inner.delete_scratch_note(&id)?)
     }
 }
 

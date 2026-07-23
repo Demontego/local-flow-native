@@ -62,7 +62,7 @@ final class EngineBridge {
     }
 
     func downloadQwen(progress: DownloadProgressCtx) -> String {
-        download(progress: progress, title: "Qwen", fn: lf_engine_download_qwen)
+        download(progress: progress, title: "Gemma4", fn: lf_engine_download_qwen)
     }
 
     private func download(
@@ -108,16 +108,46 @@ final class EngineBridge {
         return String(cString: c)
     }
 
-    func endHold(ctx: DictationCtx) -> (raw: String, clean: String, pressEnter: Bool) {
+    func endHold(ctx: DictationCtx) -> (
+        raw: String, clean: String, pressEnter: Bool, destination: String
+    ) {
         let cCtx = ctx.toC()
         defer { lf_context_free(cCtx) }
         guard let res = lf_engine_end_hold(handle, cCtx) else {
-            return ("", "", false)
+            return ("", "", false, "field")
         }
         defer { lf_session_result_free(res) }
         let raw = res.pointee.raw.map { String(cString: $0) } ?? ""
         let clean = res.pointee.clean.map { String(cString: $0) } ?? ""
-        return (raw, clean, res.pointee.press_enter != 0)
+        let destination = res.pointee.destination.map { String(cString: $0) } ?? "field"
+        return (raw, clean, res.pointee.press_enter != 0, destination)
+    }
+
+    func setDestinationScratch(_ scratch: Bool) {
+        lf_engine_set_destination_scratch(handle, scratch ? 1 : 0)
+    }
+
+    func hubSnapshotJSON() -> String {
+        guard let c = lf_engine_hub_snapshot_json(handle) else { return "{}" }
+        defer { lf_string_free(c) }
+        return String(cString: c)
+    }
+
+    func learnFromEdit(pasted: String, edited: String) -> String {
+        guard let c = lf_engine_learn_from_edit(handle, pasted, edited) else { return "[]" }
+        defer { lf_string_free(c) }
+        return String(cString: c)
+    }
+
+    @discardableResult
+    func undoLearned(heard: String) -> Bool {
+        lf_engine_undo_learned(handle, heard) != 0
+    }
+
+    func deleteScratchNote(id: String) -> String {
+        guard let c = lf_engine_delete_scratch_note(handle, id) else { return "error" }
+        defer { lf_string_free(c) }
+        return String(cString: c)
     }
 
     func cleanupText(_ text: String, ctx: DictationCtx) -> String {

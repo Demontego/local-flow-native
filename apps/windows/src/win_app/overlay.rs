@@ -18,8 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
-const HUD_W: f64 = 340.0;
-const HUD_H: f64 = 108.0;
+const HUD_W: f64 = 280.0;
+const HUD_H: f64 = 48.0;
 const MARGIN: f64 = 16.0;
 
 pub struct Overlay {
@@ -57,7 +57,8 @@ impl Overlay {
         self.text = text.into();
         reposition(&self.window);
         apply_ex_style(&self.window).ok();
-        self.window.set_outer_position(top_right_position(&self.window));
+        self.window
+            .set_outer_position(bottom_center_position(&self.window));
         self.window.set_visible(true);
         // Keep focus on the foreground app (dictation target).
         let _ = unsafe {
@@ -117,20 +118,24 @@ fn apply_ex_style(window: &Window) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn top_right_position(window: &Window) -> PhysicalPosition<i32> {
+fn bottom_center_position(window: &Window) -> PhysicalPosition<i32> {
     let scale = window.scale_factor();
     if let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) {
         let size = monitor.size();
         let pos = monitor.position();
         let w = (HUD_W * scale) as i32;
+        let h = (HUD_H * scale) as i32;
         let m = (MARGIN * scale) as i32;
-        return PhysicalPosition::new(pos.x + size.width as i32 - w - m, pos.y + m);
+        return PhysicalPosition::new(
+            pos.x + (size.width as i32 - w) / 2,
+            pos.y + size.height as i32 - h - m - (40.0 * scale) as i32,
+        );
     }
     LogicalPosition::new(MARGIN, MARGIN).to_physical(scale)
 }
 
 fn reposition(window: &Window) {
-    window.set_outer_position(top_right_position(window));
+    window.set_outer_position(bottom_center_position(window));
 }
 
 unsafe fn paint_hud(hdc: HDC, mut rect: RECT, text: &str) {

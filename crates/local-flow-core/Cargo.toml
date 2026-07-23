@@ -21,12 +21,12 @@ parking_lot = { workspace = true }
 regex = "1"
 ureq = { version = "3", features = ["rustls"] }
 
-whisper-rs = { version = "0.16", optional = true, default-features = true }
-
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 llama-cpp-2 = { version = "0.1.151", optional = true, features = ["metal"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+whisper-rs = { version = "0.16", optional = true }
 llama-cpp-2 = { version = "0.1.151", optional = true }
 
 [dev-dependencies]
