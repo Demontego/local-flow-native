@@ -1,6 +1,6 @@
 //! JNI surface for Android IME. Same cdylib as the C ABI.
 //!
-//! Uses jni 0.22 `EnvUnowned` + `with_env` (JNIEnv is no longer the real Env).
+//! jni 0.22: `EnvUnowned` + `with_env` for every exported method.
 
 use crate::c_api::{
     lf_context_free, lf_context_new, lf_engine_cancel_hold, lf_engine_delete_scratch_note,
@@ -18,8 +18,18 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-fn jstring_to_string(value: &JString) -> String {
+type JniResult<T> = Result<T, jni::errors::Error>;
+
+fn jstr(value: &JString) -> String {
     value.to_string()
+}
+
+fn cstr(value: &JString) -> CString {
+    CString::new(jstr(value)).unwrap_or_else(|_| CString::new("").unwrap())
+}
+
+fn empty_c() -> CString {
+    CString::new("").unwrap()
 }
 
 fn to_jstring(env: &mut Env, value: &str) -> jstring {
@@ -44,8 +54,26 @@ fn peek_c_string(ptr: *mut c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
 }
 
-fn empty_c() -> CString {
-    CString::new("").unwrap()
+fn resolve_string(unowned: &mut EnvUnowned, f: impl FnOnce(&mut Env) -> JniResult<jstring>) -> jstring {
+    unowned
+        .with_env(f)
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+fn engine_string(
+    unowned: &mut EnvUnowned,
+    handle: jlong,
+    null_fallback: &str,
+    call: impl FnOnce(*mut LocalFlowEngine) -> *mut c_char,
+) -> jstring {
+    let fallback = null_fallback.to_string();
+    resolve_string(unowned, move |env| {
+        if handle == 0 {
+            return Ok(to_jstring(env, &fallback));
+        }
+        let text = take_c_string(call(handle as *mut LocalFlowEngine));
+        Ok(to_jstring(env, &text))
+    })
 }
 
 #[no_mangle]
@@ -54,14 +82,14 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeCre
     _class: JClass,
     data_dir: JString,
 ) -> jlong {
-    let outcome = unowned.with_env(|_env| -> Result<jlong, jni::errors::Error> {
-        let dir = jstring_to_string(&data_dir);
-        let Ok(c_dir) = CString::new(dir) else {
-            return Ok(0);
-        };
-        Ok(lf_engine_new(c_dir.as_ptr()) as jlong)
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    unowned
+        .with_env(|_env| -> JniResult<jlong> {
+            let Ok(c_dir) = CString::new(jstr(&data_dir)) else {
+                return Ok(0);
+            };
+            Ok(lf_engine_new(c_dir.as_ptr()) as jlong)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[no_mangle]
@@ -81,14 +109,9 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeLoa
     _class: JClass,
     handle: jlong,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
-        if handle == 0 {
-            return Ok(to_jstring(env, "error: null engine"));
-        }
-        let summary = take_c_string(lf_engine_load_models(handle as *mut LocalFlowEngine));
-        Ok(to_jstring(env, &summary))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    engine_string(&mut unowned, handle, "error: null engine", |eng| {
+        lf_engine_load_models(eng)
+    })
 }
 
 #[no_mangle]
@@ -121,26 +144,27 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativePus
     handle: jlong,
     samples: jfloatArray,
 ) -> jint {
-    let outcome = unowned.with_env(|env| -> Result<jint, jni::errors::Error> {
-        if handle == 0 || samples.is_null() {
-            return Ok(-1);
-        }
-        let array = unsafe { JFloatArray::from_raw(env, samples) };
-        let len = match array.len(env) {
-            Ok(n) => n,
-            Err(_) => return Ok(-1),
-        };
-        let mut buf = vec![0f32; len];
-        if len > 0 && array.get_region(env, 0, &mut buf).is_err() {
-            return Ok(-1);
-        }
-        Ok(lf_engine_push_audio(
-            handle as *mut LocalFlowEngine,
-            buf.as_ptr(),
-            buf.len() as i32,
-        ))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    unowned
+        .with_env(|env| -> JniResult<jint> {
+            if handle == 0 || samples.is_null() {
+                return Ok(-1);
+            }
+            let array = unsafe { JFloatArray::from_raw(env, samples) };
+            let len = match array.len(env) {
+                Ok(n) => n,
+                Err(_) => return Ok(-1),
+            };
+            let mut buf = vec![0f32; len];
+            if len > 0 && array.get_region(env, 0, &mut buf).is_err() {
+                return Ok(-1);
+            }
+            Ok(lf_engine_push_audio(
+                handle as *mut LocalFlowEngine,
+                buf.as_ptr(),
+                buf.len() as i32,
+            ))
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[no_mangle]
@@ -149,14 +173,7 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativePar
     _class: JClass,
     handle: jlong,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
-        if handle == 0 {
-            return Ok(to_jstring(env, ""));
-        }
-        let text = take_c_string(lf_engine_partial(handle as *mut LocalFlowEngine));
-        Ok(to_jstring(env, &text))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    engine_string(&mut unowned, handle, "", |eng| lf_engine_partial(eng))
 }
 
 #[no_mangle]
@@ -168,14 +185,13 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeEnd
     bundle_id: JString,
     before_text: JString,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
+    resolve_string(&mut unowned, |env| {
         if handle == 0 {
             return Ok(to_jstring(env, ""));
         }
-        let app = CString::new(jstring_to_string(&app_name)).unwrap_or_else(|_| empty_c());
-        let bid = CString::new(jstring_to_string(&bundle_id)).unwrap_or_else(|_| empty_c());
-        let before =
-            CString::new(jstring_to_string(&before_text)).unwrap_or_else(|_| empty_c());
+        let app = cstr(&app_name);
+        let bid = cstr(&bundle_id);
+        let before = cstr(&before_text);
         let empty = empty_c();
         let ctx = lf_context_new(
             app.as_ptr(),
@@ -195,8 +211,7 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeEnd
         let clean = peek_c_string(unsafe { (*result).clean });
         lf_session_result_free(result);
         Ok(to_jstring(env, &clean))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    })
 }
 
 #[no_mangle]
@@ -205,14 +220,9 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeHub
     _class: JClass,
     handle: jlong,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
-        if handle == 0 {
-            return Ok(to_jstring(env, "{}"));
-        }
-        let json = take_c_string(lf_engine_hub_snapshot_json(handle as *mut LocalFlowEngine));
-        Ok(to_jstring(env, &json))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    engine_string(&mut unowned, handle, "{}", |eng| {
+        lf_engine_hub_snapshot_json(eng)
+    })
 }
 
 #[no_mangle]
@@ -221,14 +231,9 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativePer
     _class: JClass,
     handle: jlong,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
-        if handle == 0 {
-            return Ok(to_jstring(env, "{}"));
-        }
-        let json = take_c_string(lf_engine_personalization_json(handle as *mut LocalFlowEngine));
-        Ok(to_jstring(env, &json))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    engine_string(&mut unowned, handle, "{}", |eng| {
+        lf_engine_personalization_json(eng)
+    })
 }
 
 #[no_mangle]
@@ -238,18 +243,17 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeSav
     handle: jlong,
     json: JString,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
+    resolve_string(&mut unowned, |env| {
         if handle == 0 {
             return Ok(to_jstring(env, "error: null engine"));
         }
-        let payload = CString::new(jstring_to_string(&json)).unwrap_or_else(|_| empty_c());
+        let payload = cstr(&json);
         let result = take_c_string(lf_engine_save_personalization_json(
             handle as *mut LocalFlowEngine,
             payload.as_ptr(),
         ));
         Ok(to_jstring(env, &result))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    })
 }
 
 #[no_mangle]
@@ -259,18 +263,17 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeRec
     handle: jlong,
     bundle_id: JString,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
+    resolve_string(&mut unowned, |env| {
         if handle == 0 {
             return Ok(to_jstring(env, "[]"));
         }
-        let bid = CString::new(jstring_to_string(&bundle_id)).unwrap_or_else(|_| empty_c());
+        let bid = cstr(&bundle_id);
         let json = take_c_string(lf_engine_recent_json(
             handle as *mut LocalFlowEngine,
             bid.as_ptr(),
         ));
         Ok(to_jstring(env, &json))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    })
 }
 
 #[no_mangle]
@@ -281,22 +284,19 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeLea
     pasted: JString,
     edited: JString,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
+    resolve_string(&mut unowned, |env| {
         if handle == 0 {
             return Ok(to_jstring(env, "[]"));
         }
-        let pasted_c =
-            CString::new(jstring_to_string(&pasted)).unwrap_or_else(|_| empty_c());
-        let edited_c =
-            CString::new(jstring_to_string(&edited)).unwrap_or_else(|_| empty_c());
+        let pasted_c = cstr(&pasted);
+        let edited_c = cstr(&edited);
         let json = take_c_string(lf_engine_learn_from_edit(
             handle as *mut LocalFlowEngine,
             pasted_c.as_ptr(),
             edited_c.as_ptr(),
         ));
         Ok(to_jstring(env, &json))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    })
 }
 
 #[no_mangle]
@@ -306,20 +306,21 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeUnd
     handle: jlong,
     heard: JString,
 ) -> jboolean {
-    let outcome = unowned.with_env(|_env| -> Result<jboolean, jni::errors::Error> {
-        if handle == 0 {
-            return Ok(JNI_FALSE);
-        }
-        let heard_c = CString::new(jstring_to_string(&heard)).unwrap_or_else(|_| empty_c());
-        Ok(
-            if lf_engine_undo_learned(handle as *mut LocalFlowEngine, heard_c.as_ptr()) != 0 {
-                JNI_TRUE
-            } else {
-                JNI_FALSE
-            },
-        )
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    unowned
+        .with_env(|_env| -> JniResult<jboolean> {
+            if handle == 0 {
+                return Ok(JNI_FALSE);
+            }
+            let heard_c = cstr(&heard);
+            Ok(
+                if lf_engine_undo_learned(handle as *mut LocalFlowEngine, heard_c.as_ptr()) != 0 {
+                    JNI_TRUE
+                } else {
+                    JNI_FALSE
+                },
+            )
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[no_mangle]
@@ -329,18 +330,17 @@ pub extern "system" fn Java_ai_localflow_local_1flow_1app_NativeEngine_nativeDel
     handle: jlong,
     id: JString,
 ) -> jstring {
-    let outcome = unowned.with_env(|env| -> Result<jstring, jni::errors::Error> {
+    resolve_string(&mut unowned, |env| {
         if handle == 0 {
             return Ok(to_jstring(env, "error: null engine"));
         }
-        let id_c = CString::new(jstring_to_string(&id)).unwrap_or_else(|_| empty_c());
+        let id_c = cstr(&id);
         let result = take_c_string(lf_engine_delete_scratch_note(
             handle as *mut LocalFlowEngine,
             id_c.as_ptr(),
         ));
         Ok(to_jstring(env, &result))
-    });
-    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    })
 }
 
 #[no_mangle]
