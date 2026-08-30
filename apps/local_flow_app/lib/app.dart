@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'hub_page.dart';
 import 'native_engine.dart';
 
 class LocalFlowApp extends StatelessWidget {
@@ -173,7 +174,26 @@ class _LocalFlowHomeState extends State<LocalFlowHome> {
     final ready = _engine != null;
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Local Flow')),
+      appBar: AppBar(
+        title: const Text('Local Flow'),
+        actions: [
+          if (ready)
+            TextButton(
+              onPressed: () {
+                final engine = _engine;
+                if (engine == null) {
+                  return;
+                }
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => HubPage(engine: engine),
+                  ),
+                );
+              },
+              child: const Text('Hub'),
+            ),
+        ],
+      ),
       // Constrain to a comfortable reading column and centre it — clean on
       // phones and on wide tablet/desktop windows alike.
       body: Center(
@@ -230,6 +250,30 @@ class _LocalFlowHomeState extends State<LocalFlowHome> {
                 enabled: _imeEnabled,
                 onOpenSettings: _openInputSettings,
               ),
+              if (ready) ...[
+                const SizedBox(height: 8),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.dashboard_outlined),
+                    title: const Text('Hub'),
+                    subtitle: const Text(
+                      'Stats, history, scratch notes, dictionary — all local.',
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      final engine = _engine;
+                      if (engine == null) {
+                        return;
+                      }
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => HubPage(engine: engine),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
               const SizedBox(height: 8),
               _AdvancedSection(
                 busy: _busy,

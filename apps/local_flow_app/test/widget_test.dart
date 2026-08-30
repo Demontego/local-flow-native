@@ -36,5 +36,8 @@ void main() {
     await tester.tap(find.text('Advanced'));
     await tester.pumpAndSettle();
     expect(find.text('Reload models'), findsOneWidget);
+
+    // Hub entry appears only after the native engine opens (not in this harness).
+    expect(find.text('Hub'), findsNothing);
   });
 }

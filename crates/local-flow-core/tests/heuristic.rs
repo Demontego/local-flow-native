@@ -139,13 +139,58 @@ fn asr_prompt_contains_evidence_not_canned_dictation_phrases() {
         channel_hint: "worker.rs".into(),
         before_text: "let Kubernetes".into(),
         custom_vocabulary: vec!["Kubernetes".into(), "LangFuse".into()],
+        recent: vec!["деплой LangFuse на staging".into()],
         ..Default::default()
     };
     let prompt = ctx.asr_initial_prompt().expect("evidence prompt");
     assert!(prompt.contains("Kubernetes"));
     assert!(prompt.contains("worker.rs"));
+    assert!(prompt.contains("LangFuse") || prompt.contains("staging"));
     assert!(!prompt.to_lowercase().contains("голосовой ввод"));
     assert!(!prompt.to_lowercase().contains("проверка"));
+}
+
+#[test]
+fn dictionary_feeds_both_heard_and_replace_into_vocab() {
+    let settings = Personalization {
+        dictionary: vec![Replacement {
+            heard: "кубинетес".into(),
+            replace_with: "Kubernetes".into(),
+        }],
+        ..Default::default()
+    };
+    let mut ctx = DictationContext::default();
+    apply_context(&mut ctx, &settings);
+    assert!(ctx.custom_vocabulary.contains(&"Kubernetes".into()));
+    assert!(ctx.custom_vocabulary.contains(&"кубинетес".into()));
+    let prompt = ctx.asr_initial_prompt().expect("vocab prompt");
+    assert!(prompt.contains("Kubernetes"));
+    assert!(prompt.contains("кубинетес"));
+}
+
+#[test]
+fn hub_snapshot_after_record_and_personalization_roundtrip() {
+    let data = tempfile::tempdir().unwrap();
+    let eng = Engine::new(EngineConfig::new(data.path()));
+    let mut settings = eng.personalization();
+    settings.dictionary.push(Replacement {
+        heard: "гвен".into(),
+        replace_with: "Gemma".into(),
+    });
+    eng.save_personalization(&settings).unwrap();
+    local_flow_core::hub::record_dictation(
+        data.path(),
+        "сырой",
+        "привет Gemma",
+        "com.test.app",
+        local_flow_core::DictationDestination::Field,
+    )
+    .unwrap();
+    let snap = eng.hub_snapshot_json().unwrap();
+    assert!(snap.contains("привет Gemma") || snap.contains("words_today"));
+    let loaded = eng.personalization();
+    assert_eq!(loaded.dictionary.len(), 1);
+    assert_eq!(loaded.dictionary[0].replace_with, "Gemma");
 }
 
 #[test]

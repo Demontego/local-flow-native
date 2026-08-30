@@ -48,6 +48,8 @@ char *lf_engine_hub_snapshot_json(LocalFlowEngine *ptr);
 char *lf_engine_learn_from_edit(LocalFlowEngine *ptr, const char *pasted, const char *edited);
 int lf_engine_undo_learned(LocalFlowEngine *ptr, const char *heard);
 char *lf_engine_delete_scratch_note(LocalFlowEngine *ptr, const char *id);
+char *lf_engine_add_scratch_note(LocalFlowEngine *ptr, const char *text);
+char *lf_engine_suggest_learn_json(LocalFlowEngine *ptr, const char *pasted, const char *edited);
 void lf_session_result_free(LFSessionResult *r);
 LFContext *lf_context_new(const char *app_name, const char *bundle_id, const char *channel_hint,
                           const char *before_text, const char *selected_text,

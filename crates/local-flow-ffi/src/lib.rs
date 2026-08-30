@@ -198,6 +198,14 @@ impl LocalFlowEngine {
     pub fn delete_scratch_note(&self, id: String) -> Result<(), FlowError> {
         Ok(self.inner.delete_scratch_note(&id)?)
     }
+
+    pub fn add_scratch_note(&self, text: String) -> Result<String, FlowError> {
+        Ok(self.inner.add_scratch_note(&text)?)
+    }
+
+    pub fn suggest_learn_json(&self, pasted: String, edited: String) -> String {
+        self.inner.suggest_learn_json(&pasted, &edited)
+    }
 }
 
 impl LocalFlowEngine {
