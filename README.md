@@ -124,7 +124,8 @@ Weights are not in the DMG/APK (multi-GB). Download from the app after install.
 
 Local-only (no account, no sync):
 
-- **Hub** (menubar / tray): words today/week, streak, session history, scratch notes, dictionary
+- **Hub** (all shells): words today/week, streak, session history, scratch notes, dictionary
+  - macOS menubar window · Windows tray Hub window · Flutter app Hub tabs
 - Dictionary replacements (manual or learned from post-paste edits) and voice snippets
 - Per-app writing style, polish selection, live typing, context capture, cleanup toggles
 - Spoken punctuation (e.g. **запятая**, **точка**, **новая строка**)
