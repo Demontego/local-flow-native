@@ -64,7 +64,7 @@ final class KeyboardViewController: UIInputViewController {
         if engine == nil {
             statusLabel.text = "Native engine missing"
         } else if !modelsReady {
-            statusLabel.text = "Open Local Flow to download Whisper and Qwen3."
+            statusLabel.text = "Open Local Flow to download Whisper and Gemma 4."
         } else {
             statusLabel.text = "Ready. Hold to talk."
         }
