@@ -10,11 +10,21 @@ class LocalFlowApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = ColorScheme.fromSeed(seedColor: Colors.teal);
     return MaterialApp(
       title: 'Local Flow',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        colorScheme: scheme,
         useMaterial3: true,
+        // Flat, tonal, rounded cards — a quiet modern surface.
+        cardTheme: CardThemeData(
+          elevation: 0,
+          color: scheme.surfaceContainerHighest,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
       ),
       home: const LocalFlowHome(),
     );
@@ -161,57 +171,79 @@ class _LocalFlowHomeState extends State<LocalFlowHome> {
   @override
   Widget build(BuildContext context) {
     final ready = _engine != null;
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Local Flow')),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          Text(
-            'On-device dictation',
-            style: Theme.of(context).textTheme.headlineSmall,
+      // Constrain to a comfortable reading column and centre it — clean on
+      // phones and on wide tablet/desktop windows alike.
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
+            children: [
+              Text(
+                'On-device dictation',
+                style: theme.textTheme.headlineMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Hold to talk, review Whisper partials, insert one Gemma-cleaned result. '
+                'Audio, models, history, and personalization stay on this device.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 24),
+              _StatusCard(status: _status, busy: _busy),
+              const SizedBox(height: 16),
+              const _HowItWorks(),
+              const SizedBox(height: 24),
+              Tooltip(
+                message:
+                    'Downloads Whisper + Gemma 4 (~3.3 GB) once, then loads them. '
+                    'Everything runs on-device.',
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _busy || !ready ? null : _getStarted,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(52),
+                    ),
+                    icon: const Icon(Icons.download_done),
+                    label: const Text('Get started'),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'One tap downloads and loads both models. First run needs Wi-Fi and a few minutes.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              _KeyboardStep(
+                enabled: _imeEnabled,
+                onOpenSettings: _openInputSettings,
+              ),
+              const SizedBox(height: 8),
+              _AdvancedSection(
+                busy: _busy,
+                ready: ready,
+                onDownloadWhisper: () => _run(
+                    'Downloading Whisper', (engine) => engine.downloadWhisper()),
+                onDownloadGemma: () => _run(
+                    'Downloading Gemma 4', (engine) => engine.downloadQwen()),
+                onLoadModels: () =>
+                    _run('Loading models', (engine) => engine.loadModels()),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          const Text(
-            'Hold to talk in the keyboard, review Whisper partials, then insert one Gemma-cleaned result. '
-            'Audio, models, history, and personalization stay on this device.',
-          ),
-          const SizedBox(height: 24),
-          _StatusCard(status: _status, busy: _busy),
-          const SizedBox(height: 16),
-          const _HowItWorks(),
-          const SizedBox(height: 16),
-          Tooltip(
-            message:
-                'Downloads Whisper + Gemma 4 (~3.3 GB) once, then loads them. '
-                'Everything runs on-device.',
-            child: FilledButton.icon(
-              onPressed: _busy || !ready ? null : _getStarted,
-              icon: const Icon(Icons.download_done),
-              label: const Text('Get started'),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'One tap downloads and loads both models. First run needs Wi-Fi and a few minutes.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 16),
-          _KeyboardStep(
-            enabled: _imeEnabled,
-            onOpenSettings: _openInputSettings,
-          ),
-          const SizedBox(height: 8),
-          _AdvancedSection(
-            busy: _busy,
-            ready: ready,
-            onDownloadWhisper: () =>
-                _run('Downloading Whisper', (engine) => engine.downloadWhisper()),
-            onDownloadGemma: () =>
-                _run('Downloading Gemma 4', (engine) => engine.downloadQwen()),
-            onLoadModels: () =>
-                _run('Loading models', (engine) => engine.loadModels()),
-          ),
-        ],
+        ),
       ),
     );
   }
