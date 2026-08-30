@@ -84,36 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btn.action = #selector(statusButtonEvent)
         }
 
-        menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Hub", action: #selector(openHub), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "Dictate to Scratch", action: #selector(toggleScratch), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Learn from selection", action: #selector(learnFromSelection), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Load models", action: #selector(loadModels), keyEquivalent: "l"))
-        menu.addItem(NSMenuItem(title: "Download Whisper base-ru (~141MB)", action: #selector(downloadWhisper), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Download Gemma 4 E2B (~3.2GB)", action: #selector(downloadQwen), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Add dictionary replacement…", action: #selector(addDictionaryRule), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Add voice snippet…", action: #selector(addSnippet), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Set writing style for focused app…", action: #selector(setWritingStyle), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Toggle cleanup", action: #selector(toggleCleanup), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Command: polish selected text", action: #selector(polishSelectedText), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Personalization summary", action: #selector(showPersonalization), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Recent dictation for focused app", action: #selector(showRecentDictation), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Toggle live typing", action: #selector(toggleLiveTyping), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Toggle app context capture", action: #selector(toggleContextCapture), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Undo last Local Flow paste", action: #selector(undoLastPaste), keyEquivalent: "z"))
-        menu.addItem(NSMenuItem(title: "Retry last Local Flow paste", action: #selector(retryLastPaste), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Open Microphone settings", action: #selector(openMic), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open Accessibility settings", action: #selector(openAccessibility), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Fix Accessibility (reset + reopen settings)", action: #selector(fixAccessibility), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open Input Monitoring settings", action: #selector(openInputMonitoring), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Retry hotkey / permissions", action: #selector(retryPermissions), keyEquivalent: "r"))
-        menu.addItem(NSMenuItem(title: "Dump AX context (debug)", action: #selector(dumpContext), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        menu = buildMenu()
         // Do NOT assign statusItem.menu — left-click is push-to-talk.
 
         hotkey = HotkeyMonitor(
@@ -256,6 +227,117 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fn = hotkey.fnTapArmed ? "tap fn" : "Input Monitoring off"
         let ax = Permissions.isAccessibilityTrusted() ? "AX✓" : "AX✗"
         return "Ready — \(fn) · \(ax)\n\(models)"
+    }
+
+    /// Menubar menu: a few primary actions up top, everything else grouped into
+    /// submenus so the surface stays minimal. Shown on right-click of the status item.
+    private func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(item("Open Hub", #selector(openHub), key: "h"))
+        menu.addItem(item("Set up models (download + load)", #selector(setUpModels)))
+        menu.addItem(item("Dictate to Scratch", #selector(toggleScratch)))
+        menu.addItem(item("Undo last paste", #selector(undoLastPaste), key: "z"))
+        menu.addItem(.separator())
+
+        menu.addItem(submenu("Personalization", [
+            item("Learn from selection", #selector(learnFromSelection)),
+            item("Add dictionary replacement…", #selector(addDictionaryRule)),
+            item("Add voice snippet…", #selector(addSnippet)),
+            item("Set writing style for focused app…", #selector(setWritingStyle)),
+            item("Polish selected text", #selector(polishSelectedText)),
+            .separator(),
+            item("Toggle cleanup", #selector(toggleCleanup)),
+            item("Toggle live typing", #selector(toggleLiveTyping)),
+            item("Toggle app context capture", #selector(toggleContextCapture)),
+            .separator(),
+            item("Personalization summary", #selector(showPersonalization)),
+            item("Recent dictation for focused app", #selector(showRecentDictation)),
+        ]))
+
+        menu.addItem(submenu("Models", [
+            item("Load models", #selector(loadModels), key: "l"),
+            item("Download Whisper base-ru (~141MB)", #selector(downloadWhisper)),
+            item("Download Gemma 4 E2B (~3.2GB)", #selector(downloadQwen)),
+        ]))
+
+        menu.addItem(submenu("Permissions & Troubleshooting", [
+            item("Retry hotkey / permissions", #selector(retryPermissions), key: "r"),
+            item("Retry last paste", #selector(retryLastPaste)),
+            .separator(),
+            item("Open Microphone settings", #selector(openMic)),
+            item("Open Accessibility settings", #selector(openAccessibility)),
+            item("Open Input Monitoring settings", #selector(openInputMonitoring)),
+            item("Fix Accessibility (reset + reopen)", #selector(fixAccessibility)),
+            .separator(),
+            item("Dump AX context (debug)", #selector(dumpContext)),
+        ]))
+
+        menu.addItem(.separator())
+        let hint = NSMenuItem(
+            title: "Tap fn or hold LF to dictate · release to paste",
+            action: nil,
+            keyEquivalent: ""
+        )
+        hint.isEnabled = false
+        menu.addItem(hint)
+        menu.addItem(.separator())
+        menu.addItem(item("Quit", #selector(quitApp), key: "q"))
+        return menu
+    }
+
+    private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+        NSMenuItem(title: title, action: action, keyEquivalent: key)
+    }
+
+    private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let sub = NSMenu()
+        items.forEach { sub.addItem($0) }
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        parent.submenu = sub
+        return parent
+    }
+
+    /// One action to make the app usable: download both models (if missing),
+    /// then load them — mirrors the mobile "Get started" flow.
+    @objc private func setUpModels() {
+        overlay.wake()
+        overlay.showProgress(title: "Whisper", percent: 0)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let whisperCtx = DownloadProgressCtx()
+            whisperCtx.overlay = self.overlay
+            whisperCtx.title = "Whisper"
+            let whisper = self.engine.downloadWhisper(progress: whisperCtx)
+            if whisper.hasPrefix("error") {
+                DispatchQueue.main.async {
+                    self.overlay.hideProgress()
+                    self.overlay.show("Whisper failed: \(whisper)")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self.overlay.showProgress(title: "Gemma 4 E2B", percent: 0)
+            }
+            let gemmaCtx = DownloadProgressCtx()
+            gemmaCtx.overlay = self.overlay
+            gemmaCtx.title = "Gemma 4 E2B"
+            let gemma = self.engine.downloadQwen(progress: gemmaCtx)
+            if gemma.hasPrefix("error") {
+                DispatchQueue.main.async {
+                    self.overlay.hideProgress()
+                    self.overlay.show("Gemma 4 failed: \(gemma)")
+                }
+                return
+            }
+            let summary = self.engine.loadModels()
+            DispatchQueue.main.async {
+                self.overlay.hideProgress()
+                self.modelsReady = summary.contains("asr=whisper")
+                self.overlay.show(
+                    self.modelsReady ? "Models ready — tap fn to dictate" : summary
+                )
+            }
+        }
     }
 
     @objc private func openHub() {
