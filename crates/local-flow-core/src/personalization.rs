@@ -68,13 +68,30 @@ pub fn apply_context(ctx: &mut DictationContext, settings: &Personalization) {
     if let Some(style) = settings.app_styles.get(&ctx.bundle_id) {
         ctx.writing_style = style.clone();
     }
-    ctx.custom_vocabulary = settings
-        .dictionary
-        .iter()
-        .map(|item| item.replace_with.clone())
-        .filter(|word| !word.trim().is_empty())
-        .take(32)
-        .collect();
+    // Prefer correct spellings for Whisper bias; keep distinct `heard` forms too
+    // so product names the user actually says still land in the prompt.
+    let mut vocab = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &settings.dictionary {
+        for word in [&item.replace_with, &item.heard] {
+            let trimmed = word.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+            vocab.push(trimmed.to_string());
+            if vocab.len() >= 32 {
+                break;
+            }
+        }
+        if vocab.len() >= 32 {
+            break;
+        }
+    }
+    ctx.custom_vocabulary = vocab;
 }
 
 pub fn apply_replacements(text: &str, settings: &Personalization) -> String {

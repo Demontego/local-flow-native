@@ -137,6 +137,10 @@ impl DictationContext {
                     .join(" "),
             );
         }
+        let recent_tokens = recent_vocab_tokens(&self.recent);
+        if !recent_tokens.is_empty() {
+            bits.push(recent_tokens);
+        }
         if self.is_editor() {
             bits.push("код сервис коммит файл".into());
         } else if self.is_tech_chat() {
@@ -151,4 +155,37 @@ impl DictationContext {
         let joined = bits.join(" ");
         (!joined.trim().is_empty()).then(|| joined.chars().take(160).collect())
     }
+}
+
+/// Short unique tokens from recent pastes — Whisper bias only, never full phrases.
+fn recent_vocab_tokens(recent: &[String]) -> String {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut budget = 40usize;
+    for line in recent.iter().take(4) {
+        for raw in line.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+            let token = raw.trim();
+            if token.chars().count() < 4 {
+                continue;
+            }
+            let key = token.to_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+            let take = token.chars().count().min(budget);
+            if take == 0 {
+                break;
+            }
+            let clipped: String = token.chars().take(take).collect();
+            budget = budget.saturating_sub(clipped.chars().count() + 1);
+            out.push(clipped);
+            if budget == 0 || out.len() >= 6 {
+                break;
+            }
+        }
+        if budget == 0 || out.len() >= 6 {
+            break;
+        }
+    }
+    out.join(" ")
 }
