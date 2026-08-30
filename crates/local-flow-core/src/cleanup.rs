@@ -69,22 +69,31 @@ fn numbered_list(text: &str) -> String {
     re.replace(text, "1. $1\n2. $2").into_owned()
 }
 
-fn normalize_format_whitespace(text: &str) -> String {
+/// Collapse intra-line space runs and drop the space before punctuation.
+fn fix_punct_spacing(line: &str) -> String {
+    collapse_ws(line)
+        .replace(" ,", ",")
+        .replace(" .", ".")
+        .replace(" !", "!")
+        .replace(" ?", "?")
+        .replace(" :", ":")
+        .replace(" ;", ";")
+}
+
+/// Per-line spacing fix + a blank-run collapse pass. `collapse_blanks` is the
+/// literal run reduced to a single blank line (`"\n \n"` vs `"\n\n\n"`).
+fn normalize_lines(text: &str, collapse_blanks: &str) -> String {
     text.lines()
-        .map(|line| {
-            collapse_ws(line)
-                .replace(" ,", ",")
-                .replace(" .", ".")
-                .replace(" !", "!")
-                .replace(" ?", "?")
-                .replace(" :", ":")
-                .replace(" ;", ";")
-        })
+        .map(fix_punct_spacing)
         .collect::<Vec<_>>()
         .join("\n")
-        .replace("\n \n", "\n\n")
+        .replace(collapse_blanks, "\n\n")
         .trim()
         .to_string()
+}
+
+fn normalize_format_whitespace(text: &str) -> String {
+    normalize_lines(text, "\n \n")
 }
 
 /// Heuristic fallback when GGUF model is missing (keeps shell usable).
@@ -341,23 +350,7 @@ impl CleanupEngine {
 }
 
 fn normalize_llm_whitespace(text: &str) -> String {
-    text.lines()
-        .map(|line| {
-            line.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .replace(" ,", ",")
-                .replace(" .", ".")
-                .replace(" !", "!")
-                .replace(" ?", "?")
-                .replace(" :", ":")
-                .replace(" ;", ";")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace("\n\n\n", "\n\n")
-        .trim()
-        .to_string()
+    normalize_lines(text, "\n\n\n")
 }
 
 #[cfg(feature = "llama")]
