@@ -20,6 +20,21 @@ jobs:
       - name: Windows crate smoke (host)
         run: cargo run -p local-flow-windows
 
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Swift type-check (fast)
+        run: |
+          swiftc -typecheck -parse-as-library \
+            -import-objc-header apps/macos/Sources/LocalFlow/Bridging-Header.h \
+            -I apps/macos/Sources/LocalFlow \
+            apps/macos/Sources/LocalFlow/*.swift
+      - name: Build macOS menubar app (FFI full + Swift link)
+        run: make macos
+
   flutter-analyze:
     runs-on: ubuntu-latest
     steps:
