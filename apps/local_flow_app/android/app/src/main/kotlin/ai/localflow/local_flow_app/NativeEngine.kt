@@ -28,4 +28,20 @@ object NativeEngine {
         bundleId: String,
         beforeText: String,
     ): String
+
+    external fun nativeHubSnapshot(handle: Long): String
+
+    external fun nativePersonalization(handle: Long): String
+
+    external fun nativeSavePersonalization(handle: Long, json: String): String
+
+    external fun nativeRecent(handle: Long, bundleId: String): String
+
+    external fun nativeLearnFromEdit(handle: Long, pasted: String, edited: String): String
+
+    external fun nativeUndoLearned(handle: Long, heard: String): Boolean
+
+    external fun nativeDeleteScratchNote(handle: Long, id: String): String
+
+    external fun nativeSetDestinationScratch(handle: Long, scratch: Boolean)
 }

@@ -369,6 +369,32 @@ pub extern "C" fn lf_engine_delete_scratch_note(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn lf_engine_add_scratch_note(
+    ptr: *mut LocalFlowEngine,
+    text: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("error: null engine");
+    };
+    match e.add_scratch_note(cstr_to_string(text)) {
+        Ok(id) => to_cstring(&id),
+        Err(err) => to_cstring(&format!("error: {err}")),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lf_engine_suggest_learn_json(
+    ptr: *mut LocalFlowEngine,
+    pasted: *const c_char,
+    edited: *const c_char,
+) -> *mut c_char {
+    let Some(e) = eng(ptr) else {
+        return to_cstring("[]");
+    };
+    to_cstring(&e.suggest_learn_json(cstr_to_string(pasted), cstr_to_string(edited)))
+}
+
 /// Heap-owned backing store for an `LFContext`: the struct plus the `CString`s
 /// its pointers borrow. `ctx` is first so a `*mut LFContext` and a
 /// `*mut OwnedContext` share the same address (used to recover it in free).
