@@ -76,26 +76,29 @@ fn llm_ready(path: &Path) -> bool {
     path.exists() && file_size(path) > 500_000_000
 }
 
-/// Download whisper ggml if missing. Progress via callback percent 0..=100.
-pub fn download_whisper(
+/// Download `url` to `dest` unless `existing` already passes `ready`.
+/// Progress via callback percent 0..=100. Writes to a `.partial` then renames.
+fn download_if_missing(
     cfg: &EngineConfig,
+    existing: &Path,
+    dest: PathBuf,
+    url: &str,
+    ready: fn(&Path) -> bool,
     mut on_progress: impl FnMut(u32),
 ) -> Result<DownloadResult> {
-    let existing = cfg.resolve_whisper_path();
-    if whisper_ready(&existing) {
+    if ready(existing) {
         on_progress(100);
         return Ok(DownloadResult {
-            path: existing,
+            path: existing.to_path_buf(),
             already_present: true,
         });
     }
-    let dest = cfg.whisper_model.clone();
     ensure_models_dir(cfg)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = dest.with_extension("partial");
-    download_url(WHISPER_URL, &tmp, &mut on_progress)?;
+    download_url(url, &tmp, &mut on_progress)?;
     fs::rename(&tmp, &dest)?;
     on_progress(100);
     Ok(DownloadResult {
@@ -104,31 +107,29 @@ pub fn download_whisper(
     })
 }
 
+/// Download whisper ggml if missing. Progress via callback percent 0..=100.
+pub fn download_whisper(
+    cfg: &EngineConfig,
+    on_progress: impl FnMut(u32),
+) -> Result<DownloadResult> {
+    let existing = cfg.resolve_whisper_path();
+    download_if_missing(
+        cfg,
+        &existing,
+        cfg.whisper_model.clone(),
+        WHISPER_URL,
+        whisper_ready,
+        on_progress,
+    )
+}
+
 /// Download Gemma 4 E2B Q4_K_M GGUF (~3.2 GB). Name kept for FFI compat.
 pub fn download_qwen(
     cfg: &EngineConfig,
-    mut on_progress: impl FnMut(u32),
+    on_progress: impl FnMut(u32),
 ) -> Result<DownloadResult> {
     let dest = cfg.llm_model.clone();
-    if llm_ready(&dest) {
-        on_progress(100);
-        return Ok(DownloadResult {
-            path: dest,
-            already_present: true,
-        });
-    }
-    ensure_models_dir(cfg)?;
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = dest.with_extension("partial");
-    download_url(LLM_URL, &tmp, &mut on_progress)?;
-    fs::rename(&tmp, &dest)?;
-    on_progress(100);
-    Ok(DownloadResult {
-        path: dest,
-        already_present: false,
-    })
+    download_if_missing(cfg, &dest.clone(), dest, LLM_URL, llm_ready, on_progress)
 }
 
 fn download_url(url: &str, dest: &Path, on_progress: &mut impl FnMut(u32)) -> Result<()> {
