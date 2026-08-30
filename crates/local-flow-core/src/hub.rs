@@ -1,6 +1,7 @@
 //! Local Hub: dictation stats, session log, scratch notes, streak.
 
 use crate::error::{Error, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -69,13 +70,9 @@ fn notes_path(data: &Path) -> PathBuf {
     hub_dir(data).join("notes.json")
 }
 
+/// Minimal YYYY-MM-DD without a chrono dep.
+/// UTC date is fine for local streak; shells are single-user.
 fn today() -> String {
-    // UTC date is fine for local streak; shells are single-user.
-    chrono_lite_today()
-}
-
-/// Minimal YYYY-MM-DD without chrono dep.
-fn chrono_lite_today() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -101,13 +98,30 @@ fn civil_from_days(mut z: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn now_rfc3339() -> String {
+/// Unix seconds as a string — used for session/note timestamps and note ids.
+fn unix_secs() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+/// Read a JSON file, falling back to `T::default()` on any read/parse error.
+fn read_json<T: DeserializeOwned + Default>(path: PathBuf) -> T {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write a pretty-printed JSON file under the hub dir (created if missing).
+fn write_json_pretty<T: Serialize>(data: &Path, path: PathBuf, value: &T) -> Result<()> {
+    fs::create_dir_all(hub_dir(data))?;
+    let json = serde_json::to_string_pretty(value).map_err(|e| Error::msg(e.to_string()))?;
+    fs::write(path, json)?;
+    Ok(())
 }
 
 pub fn word_count(text: &str) -> usize {
@@ -135,7 +149,7 @@ pub fn record_dictation(
 
     let preview: String = clean.chars().take(120).collect();
     let ev = SessionEvent {
-        ts: now_rfc3339(),
+        ts: unix_secs(),
         raw_len: raw.chars().count(),
         clean_len: clean.chars().count(),
         word_count: words as usize,
@@ -156,17 +170,11 @@ pub fn record_dictation(
 }
 
 fn load_stats(data: &Path) -> StatsFile {
-    let Ok(s) = fs::read_to_string(stats_path(data)) else {
-        return StatsFile::default();
-    };
-    serde_json::from_str(&s).unwrap_or_default()
+    read_json(stats_path(data))
 }
 
 fn save_stats(data: &Path, stats: &StatsFile) -> Result<()> {
-    fs::create_dir_all(hub_dir(data))?;
-    let json = serde_json::to_string_pretty(stats).map_err(|e| Error::msg(e.to_string()))?;
-    fs::write(stats_path(data), json)?;
-    Ok(())
+    write_json_pretty(data, stats_path(data), stats)
 }
 
 pub fn stats_summary(data: &Path) -> StatsSummary {
@@ -253,17 +261,11 @@ pub fn list_notes(data: &Path) -> Vec<Note> {
 }
 
 fn load_notes(data: &Path) -> NotesFile {
-    let Ok(s) = fs::read_to_string(notes_path(data)) else {
-        return NotesFile::default();
-    };
-    serde_json::from_str(&s).unwrap_or_default()
+    read_json(notes_path(data))
 }
 
 fn save_notes(data: &Path, notes: &NotesFile) -> Result<()> {
-    fs::create_dir_all(hub_dir(data))?;
-    let json = serde_json::to_string_pretty(notes).map_err(|e| Error::msg(e.to_string()))?;
-    fs::write(notes_path(data), json)?;
-    Ok(())
+    write_json_pretty(data, notes_path(data), notes)
 }
 
 pub fn add_note(data: &Path, text: &str) -> Result<Note> {
@@ -273,8 +275,8 @@ pub fn add_note(data: &Path, text: &str) -> Result<Note> {
     }
     let mut file = load_notes(data);
     let note = Note {
-        id: format!("n{}", now_rfc3339()),
-        ts: now_rfc3339(),
+        id: format!("n{}", unix_secs()),
+        ts: unix_secs(),
         text: text.to_string(),
     };
     file.notes.insert(0, note.clone());
