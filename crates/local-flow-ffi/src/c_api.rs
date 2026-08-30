@@ -369,6 +369,22 @@ pub extern "C" fn lf_engine_delete_scratch_note(
     }
 }
 
+/// Heap-owned backing store for an `LFContext`: the struct plus the `CString`s
+/// its pointers borrow. `ctx` is first so a `*mut LFContext` and a
+/// `*mut OwnedContext` share the same address (used to recover it in free).
+#[repr(C)]
+struct OwnedContext {
+    ctx: LFContext,
+    app: CString,
+    bid: CString,
+    ch: CString,
+    before: CString,
+    sel: CString,
+    chat: CString,
+    recent: CString,
+    shot: CString,
+}
+
 #[no_mangle]
 pub extern "C" fn lf_context_new(
     app_name: *const c_char,
@@ -382,18 +398,6 @@ pub extern "C" fn lf_context_new(
 ) -> *mut LFContext {
     // Store owned CStrings in a heap struct for the duration of the call.
     // Callers free via lf_context_free.
-    #[repr(C)]
-    struct Owned {
-        ctx: LFContext,
-        app: CString,
-        bid: CString,
-        ch: CString,
-        before: CString,
-        sel: CString,
-        chat: CString,
-        recent: CString,
-        shot: CString,
-    }
     let cstring = |s: String| CString::new(s).unwrap_or_else(|_| CString::new("").unwrap());
     let app = cstring(cstr_to_string(app_name));
     let bid = cstring(cstr_to_string(bundle_id));
@@ -403,7 +407,7 @@ pub extern "C" fn lf_context_new(
     let chat = cstring(cstr_to_string(chat_lines));
     let recent_s = cstring(cstr_to_string(recent));
     let shot = cstring(cstr_to_string(screenshot_path));
-    let owned = Box::new(Owned {
+    let owned = Box::new(OwnedContext {
         ctx: LFContext {
             app_name: app.as_ptr(),
             bundle_id: bid.as_ptr(),
@@ -432,21 +436,9 @@ pub extern "C" fn lf_context_free(ctx: *mut LFContext) {
     if ctx.is_null() {
         return;
     }
-    // Recover Owned from ctx field offset 0
-    #[repr(C)]
-    struct Owned {
-        ctx: LFContext,
-        app: CString,
-        bid: CString,
-        ch: CString,
-        before: CString,
-        sel: CString,
-        chat: CString,
-        recent: CString,
-        shot: CString,
-    }
+    // `ctx` is the first field of OwnedContext, so it shares its address.
     unsafe {
-        let owned = ctx as *mut Owned;
+        let owned = ctx as *mut OwnedContext;
         drop(Box::from_raw(owned));
     }
 }

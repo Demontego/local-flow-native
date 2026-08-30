@@ -129,7 +129,7 @@ class _LocalFlowHomeState extends State<LocalFlowHome> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Hold to talk in the keyboard, review Whisper partials, then insert one Qwen-cleaned result. '
+            'Hold to talk in the keyboard, review Whisper partials, then insert one Gemma-cleaned result. '
             'Audio, models, history, and personalization stay on this device.',
           ),
           const SizedBox(height: 24),
@@ -154,10 +154,10 @@ class _LocalFlowHomeState extends State<LocalFlowHome> {
             onPressed: _busy
                 ? null
                 : () => _run(
-                    'Downloading Qwen3 1.7B Q4',
+                    'Downloading Gemma 4 E2B',
                     (engine) => engine.downloadQwen(),
                   ),
-            child: const Text('Download Qwen3 1.7B Q4'),
+            child: const Text('Download Gemma 4 E2B'),
           ),
           const Divider(height: 40),
           ListTile(

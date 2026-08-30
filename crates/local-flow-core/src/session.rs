@@ -194,14 +194,10 @@ impl Engine {
             let min = self.cfg.sample_rate as usize;
             if pcm.len() < min {
                 self.transcript_cache.lock().clear();
-                return Ok(SessionResult {
-                    raw: format!("empty:audio={secs:.2}s (need ≥1.0s)"),
-                    clean: String::new(),
-                    asr_confidence: None,
-                    press_enter: false,
-                    phase: SessionPhase::Idle,
-                    destination: *self.destination.lock(),
-                });
+                return Ok(self.empty_result(
+                    format!("empty:audio={secs:.2}s (need ≥1.0s)"),
+                    None,
+                ));
             }
 
             let cached = std::mem::take(&mut *self.transcript_cache.lock());
@@ -221,53 +217,15 @@ impl Engine {
             };
 
             if raw.trim().is_empty() {
-                return Ok(SessionResult {
-                    raw: format!("empty:whisper audio={secs:.2}s"),
-                    clean: String::new(),
+                return Ok(self.empty_result(
+                    format!("empty:whisper audio={secs:.2}s"),
                     asr_confidence,
-                    press_enter: false,
-                    phase: SessionPhase::Idle,
-                    destination: *self.destination.lock(),
-                });
+                ));
             }
 
             *self.phase.lock() = SessionPhase::Cleaning;
             let (clean, cleanup_decision) = if personalization.cleanup_enabled {
-                let cleanup = self.cleanup.lock();
-                let cleanup = cleanup.as_ref().ok_or(Error::ModelsNotLoaded)?;
-                let backend = cleanup.backend_name.clone();
-                match cleanup.cleanup(&raw, &ctx) {
-                    Ok(candidate) if crate::cleanup::accepts_cleanup(&raw, &candidate, &ctx) => {
-                        (candidate, backend)
-                    }
-                    Ok(candidate) => {
-                        log_quality(
-                            &self.cfg,
-                            &raw,
-                            &candidate,
-                            "guarded fallback",
-                            asr_confidence,
-                        );
-                        (
-                            crate::cleanup::heuristic_polish(&raw, &ctx),
-                            "guarded fallback".into(),
-                        )
-                    }
-                    Err(e) => {
-                        tracing::warn!("cleanup failed, heuristic fallback: {e}");
-                        log_quality(
-                            &self.cfg,
-                            &raw,
-                            &format!("cleanup_err:{e}"),
-                            "cleanup error",
-                            asr_confidence,
-                        );
-                        (
-                            crate::cleanup::heuristic_polish(&raw, &ctx),
-                            "error fallback".into(),
-                        )
-                    }
-                }
+                self.run_cleanup(&raw, &ctx, asr_confidence)?
             } else {
                 (raw.clone(), "disabled".into())
             };
@@ -308,6 +266,57 @@ impl Engine {
         // Always leave Listening/Transcribing so the next hold can start.
         *self.phase.lock() = SessionPhase::Idle;
         outcome
+    }
+
+    /// Terminal result for a hold that produced no usable text.
+    fn empty_result(&self, raw: String, asr_confidence: Option<f32>) -> SessionResult {
+        SessionResult {
+            raw,
+            clean: String::new(),
+            asr_confidence,
+            press_enter: false,
+            phase: SessionPhase::Idle,
+            destination: *self.destination.lock(),
+        }
+    }
+
+    /// Run the LLM cleanup with the accept-guard and heuristic fallbacks.
+    /// Returns the cleaned text and a short decision label for `paste.log`.
+    fn run_cleanup(
+        &self,
+        raw: &str,
+        ctx: &DictationContext,
+        asr_confidence: Option<f32>,
+    ) -> Result<(String, String)> {
+        let cleanup = self.cleanup.lock();
+        let cleanup = cleanup.as_ref().ok_or(Error::ModelsNotLoaded)?;
+        let backend = cleanup.backend_name.clone();
+        Ok(match cleanup.cleanup(raw, ctx) {
+            Ok(candidate) if crate::cleanup::accepts_cleanup(raw, &candidate, ctx) => {
+                (candidate, backend)
+            }
+            Ok(candidate) => {
+                log_quality(&self.cfg, raw, &candidate, "guarded fallback", asr_confidence);
+                (
+                    crate::cleanup::heuristic_polish(raw, ctx),
+                    "guarded fallback".into(),
+                )
+            }
+            Err(e) => {
+                tracing::warn!("cleanup failed, heuristic fallback: {e}");
+                log_quality(
+                    &self.cfg,
+                    raw,
+                    &format!("cleanup_err:{e}"),
+                    "cleanup error",
+                    asr_confidence,
+                );
+                (
+                    crate::cleanup::heuristic_polish(raw, ctx),
+                    "error fallback".into(),
+                )
+            }
+        })
     }
 
     pub fn cancel_hold(&self) {
