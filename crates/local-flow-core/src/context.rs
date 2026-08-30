@@ -81,12 +81,6 @@ impl DictationContext {
         .any(|h| blob.contains(h))
     }
 
-    /// Full context dump — for debugging / shells. Not for LLM cleanup
-    /// (chat/draft prose makes small models invent text).
-    pub fn to_prompt_block(&self) -> String {
-        self.to_cleanup_hint()
-    }
-
     /// Minimal disambiguation for Gemma: app + tone only.
     /// Never include chat/draft/selection/recent — model copies that instead of ASR.
     pub fn to_cleanup_hint(&self) -> String {
