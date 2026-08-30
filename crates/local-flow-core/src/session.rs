@@ -43,6 +43,8 @@ pub struct Engine {
     destination: Mutex<DictationDestination>,
     /// Serialize model loads (boot + menu "Load models" race → heuristic overwrite).
     load_lock: Mutex<()>,
+    /// Disk personalization; refreshed on save / learn / undo.
+    personalization_cache: Mutex<Option<personalization::Personalization>>,
 }
 
 impl Engine {
@@ -56,6 +58,7 @@ impl Engine {
             transcript_cache: Mutex::new(String::new()),
             destination: Mutex::new(DictationDestination::Field),
             load_lock: Mutex::new(()),
+            personalization_cache: Mutex::new(None),
         }
     }
 
@@ -182,7 +185,7 @@ impl Engine {
         }
 
         let outcome = (|| -> Result<SessionResult> {
-            let personalization = personalization::load(&self.cfg.data_dir);
+            let personalization = self.cached_personalization();
             personalization::apply_context(&mut ctx, &personalization);
             if ctx.recent.is_empty() && !ctx.bundle_id.is_empty() {
                 ctx.recent = history::load_recent(&self.cfg.data_dir, &ctx.bundle_id);
@@ -336,12 +339,29 @@ impl Engine {
         cleanup.cleanup(raw, ctx)
     }
 
+    fn cached_personalization(&self) -> personalization::Personalization {
+        let mut cache = self.personalization_cache.lock();
+        if cache.is_none() {
+            *cache = Some(personalization::load(&self.cfg.data_dir));
+        }
+        cache
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(personalization::Personalization::default)
+    }
+
+    fn invalidate_personalization_cache(&self) {
+        *self.personalization_cache.lock() = None;
+    }
+
     pub fn personalization(&self) -> personalization::Personalization {
-        personalization::load(&self.cfg.data_dir)
+        self.cached_personalization()
     }
 
     pub fn save_personalization(&self, settings: &personalization::Personalization) -> Result<()> {
-        personalization::save(&self.cfg.data_dir, settings)
+        personalization::save(&self.cfg.data_dir, settings)?;
+        *self.personalization_cache.lock() = Some(settings.clone());
+        Ok(())
     }
 
     pub fn recent_for(&self, bundle_id: &str) -> Vec<String> {
@@ -363,11 +383,16 @@ impl Engine {
 
     pub fn learn_from_edit(&self, pasted: &str, edited: &str) -> Result<String> {
         let rules = learn::learn_from_edit(&self.cfg.data_dir, pasted, edited)?;
+        self.invalidate_personalization_cache();
         serde_json::to_string(&rules).map_err(|e| Error::msg(e.to_string()))
     }
 
     pub fn undo_learned(&self, heard: &str) -> Result<bool> {
-        learn::undo_replacement(&self.cfg.data_dir, heard)
+        let changed = learn::undo_replacement(&self.cfg.data_dir, heard)?;
+        if changed {
+            self.invalidate_personalization_cache();
+        }
+        Ok(changed)
     }
 
     pub fn suggest_learn_json(&self, pasted: &str, edited: &str) -> String {
