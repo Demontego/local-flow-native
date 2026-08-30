@@ -24,7 +24,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+jni = "0.22"
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"] }

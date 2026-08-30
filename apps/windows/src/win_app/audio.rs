@@ -27,10 +27,12 @@ impl Capture {
         let running = Arc::new(AtomicBool::new(true));
         let running_flag = Arc::clone(&running);
 
-        let stream = match config.sample_format() {
+        let sample_format = config.sample_format();
+        let stream_config: cpal::StreamConfig = config.into();
+        let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32, _>(
                 &device,
-                &config.into(),
+                stream_config,
                 sample_rate,
                 channels,
                 running_flag,
@@ -38,7 +40,7 @@ impl Capture {
             )?,
             SampleFormat::I16 => build_stream::<i16, _>(
                 &device,
-                &config.into(),
+                stream_config,
                 sample_rate,
                 channels,
                 running_flag,
@@ -46,7 +48,15 @@ impl Capture {
             )?,
             SampleFormat::U16 => build_stream::<u16, _>(
                 &device,
-                &config.into(),
+                stream_config,
+                sample_rate,
+                channels,
+                running_flag,
+                move |data| on_samples(data),
+            )?,
+            SampleFormat::I32 => build_stream::<i32, _>(
+                &device,
+                stream_config,
                 sample_rate,
                 channels,
                 running_flag,
@@ -70,7 +80,7 @@ impl Drop for Capture {
 
 fn build_stream<T, F>(
     device: &cpal::Device,
-    config: &cpal::StreamConfig,
+    config: cpal::StreamConfig,
     sample_rate: u32,
     channels: usize,
     running: Arc<AtomicBool>,
