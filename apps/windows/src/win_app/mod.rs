@@ -188,9 +188,15 @@ fn worker_loop(
                 }
                 listening.store(true, Ordering::SeqCst);
                 let eng = Arc::clone(&engine);
-                match audio::Capture::start(move |samples| {
-                    let _ = eng.push_audio(samples);
-                }) {
+                let status_proxy = proxy.clone();
+                match audio::Capture::start(
+                    move |samples| {
+                        let _ = eng.push_audio(samples);
+                    },
+                    move |msg| {
+                        let _ = status_proxy.send_event(UserEvent::Status(msg));
+                    },
+                ) {
                     Ok(cap) => {
                         *capture.lock() = Some(cap);
                         let _ = proxy.send_event(UserEvent::Status("Listening…".into()));
@@ -419,8 +425,10 @@ impl App {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Local Flow — tap Right Ctrl")
+            .with_tooltip("Local Flow — tap Right Ctrl · left-click opens menu")
             .with_icon(make_icon())
+            // Windows: left-click opens the same menu as right-click (tray-icon 0.24).
+            .with_menu_on_left_click(true)
             .build()?;
 
         self.item_load = Some(item_load);
