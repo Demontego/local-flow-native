@@ -11,8 +11,10 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Whisper + Qwen (slow compile). Release / `make windows` enable this.
+# Whisper + Gemma (slow compile). Release / `make windows` enable this.
 full = ["local-flow-core/full"]
+# Gemma GPU offload via Vulkan (Windows/Linux). Pair with `full`.
+vulkan = ["local-flow-core/vulkan"]
 
 [dependencies]
 local-flow-core = { workspace = true }

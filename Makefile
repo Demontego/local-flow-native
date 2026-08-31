@@ -87,11 +87,11 @@ package-ios-libs: ffi-ios-sim
 
 # Run on Windows with the MSVC toolchain installed.
 ffi-windows:
-	$(CARGO) build -p local-flow-ffi --release --features full --target x86_64-pc-windows-msvc
+	$(CARGO) build -p local-flow-ffi --release --features full,vulkan --target x86_64-pc-windows-msvc
 
 # Run on Ubuntu 24.04 with build-essential installed.
 ffi-linux:
-	$(CARGO) build -p local-flow-ffi --release --features full --target x86_64-unknown-linux-gnu
+	$(CARGO) build -p local-flow-ffi --release --features full,vulkan --target x86_64-unknown-linux-gnu
 
 macos: ffi
 	mkdir -p "$(APP_BUNDLE)/Contents/MacOS"
@@ -145,7 +145,7 @@ clean-install-macos:
 	bash scripts/clean_install_macos.sh
 
 windows:
-	$(CARGO) build -p local-flow-windows --release --features full
+	$(CARGO) build -p local-flow-windows --release --features full,vulkan
 	@ls -la "$(TARGET_DIR)/release/local-flow-windows"* 2>/dev/null || true
 	@echo "Windows tray binary under $(TARGET_DIR)/release/"
 

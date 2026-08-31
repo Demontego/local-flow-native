@@ -14,6 +14,7 @@ default = []
 full = ["local-flow-core/full"]
 whisper = ["local-flow-core/whisper"]
 llama = ["local-flow-core/llama"]
+vulkan = ["local-flow-core/vulkan"]
 
 [dependencies]
 local-flow-core = { workspace = true }

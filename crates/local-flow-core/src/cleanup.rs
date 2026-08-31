@@ -390,55 +390,37 @@ mod llama_backend {
             .ok_or_else(|| Error::Cleanup("llama backend not initialized".into()))
     }
 
+    /// Enough for system + short dictation + gen; avoids per-call 3k alloc.
+    const N_CTX: u32 = 1536;
+
+    /// llama.cpp context is not marked Send; we only touch it under `LlamaCleanup::ctx`.
+    struct OwnedCtx(llama_cpp_2::context::LlamaContext<'static>);
+    // SAFETY: exclusive access via `Mutex` in `LlamaCleanup`; never shared across threads.
+    unsafe impl Send for OwnedCtx {}
+
     pub struct LlamaCleanup {
+        /// Declared before `model` so Drop frees context while the model still lives.
+        ctx: Mutex<Option<OwnedCtx>>,
         model: LlamaModel,
         system: String,
-        lock: Mutex<()>,
     }
 
     impl LlamaCleanup {
         pub fn load(model_path: &Path, system_prompt: &str) -> Result<Self> {
             let backend = shared_backend()?;
-            // Whisper runs CPU-only — Gemma can take Metal. Huge win on Apple silicon.
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            let params = LlamaModelParams::default().with_n_gpu_layers(999);
-            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            let params = LlamaModelParams::default().with_n_gpu_layers(0);
+            // Whisper stays CPU. Gemma: Metal on Apple; Vulkan when feature on.
+            let n_gpu = if cfg!(any(target_os = "macos", target_os = "ios"))
+                || cfg!(feature = "vulkan")
+            {
+                999
+            } else {
+                0
+            };
+            let params = LlamaModelParams::default().with_n_gpu_layers(n_gpu);
             let model = LlamaModel::load_from_file(backend, model_path, &params)
                 .map_err(|e| Error::Cleanup(format!("load gguf: {e}")))?;
             // Full cleanup.txt is short enough; truncating it starved edit instructions.
             let system = truncate_chars(system_prompt.trim(), 1800);
-            Ok(Self {
-                model,
-                system,
-                lock: Mutex::new(()),
-            })
-        }
-    }
-
-    impl CleanupBackend for LlamaCleanup {
-        fn cleanup(&self, raw: &str, ctx: &DictationContext) -> Result<String> {
-            let _guard = self.lock.lock();
-            let hint = truncate_chars(&ctx.to_cleanup_hint(), 200);
-            let raw = truncate_chars(raw.trim(), 900);
-            // Dictation first — never bury ASR under UI prose.
-            let user = format!(
-                "SOURCE OF TRUTH = Dictation below. Polish ONLY that text.\n\
-                 Do NOT copy, continue, or invent from app/window context.\n\
-                 MUST: fix ASR endings/homophones, product names → Latin \
-                 (Cursor, Qwen, Whisper, GitHub), add punctuation, drop fillers (ну/типа/ээ).\n\
-                 Keep every clause from Dictation — no summary, no extra sentences.\n\
-                 Ex: «голосового вода в курсуаре … гвен» → «голосового ввода в Cursor … Qwen».\n\n\
-                 Dictation:\n{raw}\n\n\
-                 Hint (tone/vocab only, do not quote):\n{hint}\n\n\
-                 Cleaned text:"
-            );
-            // Gemma 4 Jinja chat_template fails in llama-cpp minja (ffi -1).
-            let prompt = format_gemma4_prompt(&self.system, &user);
-
-            // Room for punctuation + mild rewrites (not just echo).
-            let n_gen = (raw.chars().count() * 3 / 4 + 64).clamp(96, 512);
-            const N_CTX: u32 = 3072;
             let n_threads = std::thread::available_parallelism()
                 .map(|n| n.get() as i32)
                 .unwrap_or(4)
@@ -450,10 +432,41 @@ mod llama_backend {
                 .with_n_threads(n_threads)
                 .with_n_threads_batch(n_threads)
                 .with_offload_kqv(true);
-            let mut lctx = self
-                .model
-                .new_context(shared_backend()?, ctx_params)
+            let lctx = model
+                .new_context(backend, ctx_params)
                 .map_err(|e| Error::Cleanup(format!("new_context: {e}")))?;
+            // SAFETY: `ctx` is dropped before `model` (field declaration order).
+            // Lifetime is only a borrow of `model`; we never move `model` out.
+            let lctx: llama_cpp_2::context::LlamaContext<'static> =
+                unsafe { std::mem::transmute(lctx) };
+            Ok(Self {
+                ctx: Mutex::new(Some(OwnedCtx(lctx))),
+                model,
+                system,
+            })
+        }
+    }
+
+    impl CleanupBackend for LlamaCleanup {
+        fn cleanup(&self, raw: &str, ctx: &DictationContext) -> Result<String> {
+            let mut lctx_guard = self.ctx.lock();
+            let lctx = &mut lctx_guard
+                .as_mut()
+                .ok_or_else(|| Error::Cleanup("llama context missing".into()))?
+                .0;
+            lctx.clear_kv_cache();
+
+            let hint = truncate_chars(&ctx.to_cleanup_hint(), 200);
+            let raw = truncate_chars(raw.trim(), 900);
+            // Rules live in cleanup.txt / system — keep the user turn lean.
+            let user = format!(
+                "Dictation:\n{raw}\n\nHint (tone/vocab only, do not quote):\n{hint}\n\nCleaned text:"
+            );
+            // Gemma 4 Jinja chat_template fails in llama-cpp minja (ffi -1).
+            let prompt = format_gemma4_prompt(&self.system, &user);
+
+            // Room for punctuation + mild rewrites (not just echo).
+            let n_gen = (raw.chars().count() * 3 / 4 + 64).clamp(96, 384);
 
             let mut tokens = self
                 .model
@@ -489,8 +502,8 @@ mod llama_backend {
                 i = end;
             }
 
-            let mut sampler =
-                LlamaSampler::chain_simple([LlamaSampler::temp(0.2), LlamaSampler::greedy()]);
+            // Greedy only — temp+greedy was redundant (temp never sampled).
+            let mut sampler = LlamaSampler::chain_simple([LlamaSampler::greedy()]);
             let mut out = String::new();
             let mut n_cur = n as i32;
             let n_ctx = N_CTX as i32;
@@ -498,7 +511,7 @@ mod llama_backend {
                 if n_cur >= n_ctx {
                     break;
                 }
-                let token = sampler.sample(&lctx, -1);
+                let token = sampler.sample(lctx, -1);
                 sampler.accept(token);
                 if self.model.is_eog_token(token) {
                     break;
