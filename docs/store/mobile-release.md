@@ -3,6 +3,11 @@
 Targets: Google Play and Apple App Store. No signing credential, provisioning
 profile, key, API token, or keystore belongs in this repository.
 
+Unsigned / debug CI packages (macOS DMG, Windows tray, Android debug APK, iOS
+simulator `.app` zip) upload automatically on every merge to `main` via the
+**Build all platforms** workflow (`.github/workflows/build-all.yml`). Tag
+`v*` builds still publish a GitHub Release from `release.yml`.
+
 ## Google Play
 
 Set these protected CI secrets or local environment variables:

@@ -1,9 +1,8 @@
 name: CI
 
+# PR / manual only. Full multi-platform binaries upload on merge via build-all.yml.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

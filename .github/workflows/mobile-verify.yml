@@ -1,5 +1,5 @@
-# Full mobile package builds need NDK / Xcode signing. Keep this opt-in until
-# the runner images are wired (see docs/store/mobile-release.md).
+# Opt-in package builds (NDK / Xcode). Prefer merge → build-all.yml artifacts;
+# use this to dry-run Android/iOS packaging from a branch before merge.
 name: Mobile package (manual)
 
 on:

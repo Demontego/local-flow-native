@@ -1,15 +1,22 @@
-# Tag v* → GitHub Release (macOS DMG + Windows tray + Android debug APK).
-# Merge-to-main binaries (same shells + iOS sim) upload via build-all.yml.
-# Store-signed AAB/IPA stay manual (see docs/store/mobile-release.md).
-name: Release
+# On merge to main (and manual dispatch): build every shipping shell and upload
+# artifacts. Tag builds still go through release.yml → GitHub Release.
+name: Build all platforms
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: build-all-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
+
+env:
+  # Short SHA label for artifact filenames on main merges.
+  BUILD_LABEL: main-${{ github.sha }}
 
 jobs:
   macos-dmg:
@@ -18,18 +25,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build DMG
         run: make dmg
       - name: Stage artifacts
         run: |
           mkdir -p dist/release
-          cp dist/*.dmg dist/release/
+          for f in dist/*.dmg; do
+            base=$(basename "$f" .dmg)
+            cp "$f" "dist/release/${base}-${BUILD_LABEL}.dmg"
+          done
           shasum -a 256 dist/release/*.dmg > dist/release/SHA256SUMS-macos.txt
+          ls -la dist/release
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
   windows-exe:
     runs-on: windows-latest
@@ -39,6 +52,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
       - name: Build Windows tray (full)
         shell: bash
         run: make windows
@@ -51,11 +65,9 @@ jobs:
             Where-Object { $_.FullName -match '[\\/]release[\\/]' } |
             Select-Object -First 1
           if (-not $exe) { throw "local-flow-windows.exe not found under target/*/release" }
-          $ver = "${{ github.ref_name }}"
-          if ($ver -notlike "v*") { $ver = "0.1.0" }
-          $ver = $ver.TrimStart("v")
-          $outName = "local-flow-$ver-windows-x64.exe"
-          $zipName = "local-flow-$ver-windows-x64.zip"
+          $label = $env:BUILD_LABEL
+          $outName = "local-flow-$label-windows-x64.exe"
+          $zipName = "local-flow-$label-windows-x64.zip"
           $out = Join-Path "dist/release" $outName
           $zip = Join-Path "dist/release" $zipName
           Copy-Item -Force $exe.FullName $out
@@ -68,12 +80,14 @@ jobs:
             $lines += "$hash  $(Split-Path $f -Leaf)"
           }
           $lines | Set-Content -Encoding ascii -Path $sum
+          Get-ChildItem dist/release | Format-Table Name, Length
           Get-Content $sum
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
   android-apk:
     runs-on: ubuntu-latest
@@ -87,6 +101,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
@@ -103,39 +118,50 @@ jobs:
         run: |
           mkdir -p dist/release
           cp apps/local_flow_app/build/app/outputs/flutter-apk/app-debug.apk \
-            "dist/release/local-flow-${{ github.ref_name }}-android-debug.apk"
+            "dist/release/local-flow-${BUILD_LABEL}-android-debug.apk"
           if [[ -d dist/android ]]; then cp -R dist/android/. dist/release/ || true; fi
           shasum -a 256 dist/release/*.apk > dist/release/SHA256SUMS-android.txt
+          ls -la dist/release
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
-  github-release:
-    needs: [macos-dmg, windows-exe, android-apk]
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  ios-simulator:
+    runs-on: macos-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: release-assets
-          merge-multiple: true
-      - name: List assets
-        run: find release-assets -type f | sort
-      - uses: softprops/action-gh-release@v2
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
         with:
-          draft: false
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          body: |
-            ### Install notes
-            - **macOS:** open the DMG, drag to Applications; grant Mic / Accessibility / Input Monitoring.
-            - **Windows:** run the `.exe` or unpack the portable `.zip` (tray icon **LF**); hold **Ctrl+Alt** to dictate. Grant microphone access when prompted.
-            - **Android:** debug APK — enable the Local Flow keyboard in system settings after install.
-            - Model weights are downloaded in-app (not bundled).
-          files: release-assets/**
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          channel: stable
+          cache: true
+      - name: Build iOS simulator app (unsigned)
+        run: make ios-simulator
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist/release
+          APP=$(find apps/local_flow_app/build/ios -path '*/iphonesimulator/*.app' -type d | head -1)
+          test -n "$APP" || { echo "no .app under build/ios"; find apps/local_flow_app/build/ios -maxdepth 4 2>/dev/null | head -50; exit 1; }
+          (cd "$(dirname "$APP")" && zip -qry "$GITHUB_WORKSPACE/dist/release/local-flow-${BUILD_LABEL}-ios-simulator.app.zip" "$(basename "$APP")")
+          shasum -a 256 dist/release/*.zip > dist/release/SHA256SUMS-ios.txt
+          ls -la dist/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  all-green:
+    needs: [macos-dmg, windows-exe, android-apk, ios-simulator]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All platform builds succeeded
+        run: echo "macOS DMG, Windows exe, Android APK, iOS simulator — artifacts uploaded."
